@@ -119,7 +119,8 @@ class GemmaWrapper(VLMWrapper):
 VLM_MODELS = {
     'flamingo-3b-instruct': lambda: FlamingoWrapper("OpenFlamingo-3B-Instruct"),
     'flamingo-4b': lambda: FlamingoWrapper("OpenFlamingo-4B"),
-    'medgemma': lambda: GemmaWrapper("MedGemma"),
+    'flamingo-9b': lambda: FlamingoWrapper("OpenFlamingo-9B"),
+    # 'medgemma': lambda: GemmaWrapper("MedGemma"),
     'medflamingo': lambda: FlamingoWrapper("MedFlamingo"),
 }
 
@@ -160,7 +161,8 @@ class PromptLibrary:
         """In-context learning."""
         return PromptConfig(
             base_prompt="Based on the image, this lesion is benign.<|endofchunk|>Based on the image, this lesion is malignant.<|endofchunk|>\n\n",
-            demo_template="<image>Analysis: {reasoning}\nConclusion: This lesion is {label}.<|endofchunk|>",
+            # demo_template="<image>Analysis: {reasoning}\nConclusion: This lesion is {label}.<|endofchunk|>",
+            demo_template="<image>Based on the images, this lesion is {label}.<|endofchunk|>",
             query_template="<image>Analysis:",
             use_demos=True,
             label_map={'benign': 'benign', 'malignant': 'malignant'}
@@ -208,6 +210,16 @@ class ConceptLibrary:
             name="english",
             files=[
                 '/home/groups/roxanad/sonnet/vcr/src/concept_sets/google-10000-english-no-swears.txt',
+            ]
+        )
+    
+    @staticmethod
+    def english_3k() -> ConceptSetConfig:
+        """Standard English concepts."""
+        return ConceptSetConfig(
+            name="english_3k",
+            files=[
+                '/home/groups/roxanad/sonnet/vcr/src/concept_sets/3k.txt',
             ]
         )
     
@@ -522,39 +534,34 @@ class VCRExperimentRunner:
 def main():
     """Example: Run different experiment configurations."""
     
-    # Baseline experiment with contrastive scoring
-    baseline_config = ExperimentConfig(
-        name="baseline",
-        results_dir="results/flamingo3b_contrastive_medical",
-        model_key="flamingo-3b-instruct",
-        layer_position="last",
-        prompt_config=PromptLibrary.ddi_binary_classification(),
-        task_definition=TASK_DEFINITIONS["contrastive_malignant_benign"],
-        concept_set=ConceptLibrary.medical_only(),
-        metadata_path='/scratch/users/sonnet/ddi/ddi_metadata.csv',
-        data_base_dir="/scratch/users/sonnet/ddi",
-        random_seeds=list(range(25))
-    )
-    
-    runner = VCRExperimentRunner(baseline_config)
-    runner.run_all_seeds()
+    models = ['flamingo-3b-instruct', 'flamingo-4b', 'flamingo-9b', 'medflamingo']
+    layers = ['last']
+    tasks = ['contrastive_malignant_benign', 'malignant_prob']
+    prompt_configs = [PromptLibrary.ddi_binary_classification(), PromptLibrary.ddi_icl()]
+    concepts = [ConceptLibrary.english(), ConceptLibrary.english_3k()]
 
-    # Baseline experiment with malignant prob
-    malignant_prob_config = ExperimentConfig(
-        name="baseline_malignant_prob",
-        results_dir="results/flamingo3b_malignant_prob_medical",
-        model_key="flamingo-3b-instruct",
-        layer_position="last",
-        prompt_config=PromptLibrary.ddi_binary_classification(),
-        task_definition=TASK_DEFINITIONS["malignant_prob"],
-        concept_set=ConceptLibrary.medical_only(),
-        metadata_path='/scratch/users/sonnet/ddi/ddi_metadata.csv',
-        data_base_dir="/scratch/users/sonnet/ddi",
-        random_seeds=list(range(25))
-    )
-    
-    runner3 = VCRExperimentRunner(malignant_prob_config)
-    runner3.run_all_seeds()
+    # Run experiments
+    for model in models:
+        for layer in layers:
+            for task in tasks:
+                for prompt_config in prompt_configs:
+                    mode = 'icl' if prompt_config.use_demos else 'zero_shot'
+                    for concept_set in concepts:
+                        concept_set_name = concept_set.name
+                        config = ExperimentConfig(
+                            name=f"{model}_{layer}_{task}",
+                            results_dir=f"results/{model}_{layer}_{task}_{mode}_{concept_set_name}",
+                            model_key=model,
+                            layer_position=layer,
+                            prompt_config=prompt_config,
+                            task_definition=TASK_DEFINITIONS[task],
+                            concept_set=concept_set,
+                            metadata_path='/scratch/users/sonnet/ddi/ddi_metadata.csv',
+                            data_base_dir="/scratch/users/sonnet/ddi",
+                            random_seeds=list(range(25))
+                        )
+                        runner = VCRExperimentRunner(config)
+                        runner.run_all_seeds()
 
 
 if __name__ == '__main__':

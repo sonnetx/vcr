@@ -15,6 +15,7 @@
 
 ml python/3.9.0
 ml cuda/11.7.1
+ml gcc/14.2.0
 
 # Activate the virtual environment
 source /home/groups/roxanad/sonnet/vcr/flam_env/bin/activate

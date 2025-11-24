@@ -81,6 +81,7 @@ class ExperimentConfig:
     test_size: float = 0.5
     demo_size: float = 0.02
     random_state: int = 42
+    filter_skin_tone: Optional[int] = None
     
 ##
 ## Generate top concepts for DDI dataset
@@ -123,8 +124,12 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
         base_dir=config_dict['ddi_base_dir'],
         test_size=config_dict.get('test_size', 0.5),
         demo_size=config_dict.get('demo_size', 0.02),
-        random_state=random_seed  # Use current seed
+        random_state=random_seed,  # Use current seed
+        filter_skin_tone=config_dict.get('filter_skin_tone'),
     )
+    
+    data_loader.benign_label = "Benign"
+    data_loader.malignant_label = "Malignant"
     
     print(f"Dataset info for seed {random_seed}:", data_loader.get_info())
     
@@ -251,18 +256,34 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
 
 def main():
     
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Run VCR experiment with DDI dataset')
+    parser.add_argument('--model', type=str, default='OpenFlamingo-3B-Instruct',
+                       choices=['OpenFlamingo-3B-Instruct', 'OpenFlamingo-4B'],
+                       help='Model to use')
+    parser.add_argument('--use_demos', action='store_true',
+                       help='Use in-context learning demos')
+    parser.add_argument('--filter_skin_tone', type=str, default='All',
+                       help='Filter by skin tone: All, 12, or 56')
+    parser.add_argument('--random_seeds', type=int, nargs='+', default=list(range(25)),
+                       help='Random seeds to test')
+    args = parser.parse_args()
+    
     # ===== EXPERIMENT CONFIGURATION =====
     
     # Random seeds to test
-    random_seeds = list(range(25))  # Add or remove seeds as needed
+    random_seeds = args.random_seeds
     
     # Prompt configuration - edit this to change your prompt
     prompt_config = PromptConfig(
-        base_prompt="Based on the image, this lesion is benign.<|endofchunk|>Based on the image, this lesion is malignant.<|endofchunk|>",
-        demo_template="<image>Based on the image, this lesion is {label}.<|endofchunk|>",
-        query_template="<image>Based on the image, this lesion is", ## since the query ends w/o a space, start choices w/ a space
-        completion=" malignant",  # Note: leading spaces matter for tokenization
-        use_demos=False ## change this if you want to do ICL or not
+        base_prompt= (
+                "You are a medical image analysis assistant. For each skin lesion image, "
+                "choose between Benign and Malignant.\n\nExamples:\n\n"
+            ),
+        demo_template="<image>\nThe lesion is {label}.\n\n",
+        query_template="<image>\nThe lesion is", ## since the query ends w/o a space, start choices w/ a space
+        completion="Malignant",  # Note: leading spaces matter for tokenization
+        use_demos=args.use_demos
     )
     
     # Data preprocessing function - edit this to change how labels are created
@@ -272,8 +293,8 @@ def main():
         Edit this function to change how labels are mapped.
         """
         # Extract clean labels from prompt choices
-        benign_label = "benign"
-        malignant_label = "malignant"
+        benign_label = "Benign"
+        malignant_label = "Malignant"
         
         # Create label column - EDIT THIS MAPPING as needed
         df['label'] = df['malignant'].map({
@@ -290,20 +311,24 @@ def main():
     }
     
     # Paths and model configuration
+    skin_tone_suffix = f"_skin{args.filter_skin_tone}" if args.filter_skin_tone != 'All' else ''
+    demos_suffix = '_ICL' if args.use_demos else ''
+    
     base_config = {
-        'results_dir': 'MedFlamingo_DDI_ZS_LastLayer_pvalue_noswears', ## descriptive name for seed stability experiment
-        'model_name': 'OpenFlamingo-3B-Instruct',
+        'results_dir': f'{args.model}_DDI{demos_suffix}_LastLayer{skin_tone_suffix}',
+        'model_name': args.model,
         'metadata_path': '/scratch/users/sonnet/ddi/ddi_metadata.csv',
         'ddi_base_dir': "/scratch/users/sonnet/ddi",
         'concept_files': ['/home/groups/roxanad/sonnet/vcr/src/concept_sets/google-10000-english-no-swears.txt',
                           '/home/groups/roxanad/sonnet/vcr/src/concept_sets/medical.txt'],
+        'filter_skin_tone': None if args.filter_skin_tone == 'All' else int(args.filter_skin_tone),
     }
     
-    # Just the last layer for OpenFlamingo-4B
-#     layer_name = 'model.lang_encoder.gpt_neox.layers.31.decoder_layer'
-    
-    # For OF-3B-I, use this instead:
-    layer_name = 'model.lang_encoder.transformer.blocks.23.decoder_layer'
+    # Select layer based on model
+    if args.model == 'OpenFlamingo-4B':
+        layer_name = 'model.lang_encoder.gpt_neox.layers.31.decoder_layer'
+    else:  # OpenFlamingo-3B-Instruct
+        layer_name = 'model.lang_encoder.transformer.blocks.23.decoder_layer'
     
     # ===== END CONFIGURATION =====
     
@@ -340,13 +365,6 @@ def main():
     # Try to compute shared data once (similarity matrix) using first seed
     # This assumes the CLIP embeddings don't depend on the random seed
     shared_data = None
-    try:
-        print("Checking for pre-computed shared data...")
-        shared_data = load_experiment_data(results_dir)
-        if 'similarity_matrix' in shared_data:
-            print("Found shared similarity matrix")
-    except:
-        print("No shared data found - will compute for first seed and reuse")
     
     # Run experiments for each random seed
     all_sensitivities = []

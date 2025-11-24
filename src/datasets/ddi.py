@@ -18,7 +18,8 @@ class DDIDataLoader:
     """Simple class to handle DDI dataset loading and splitting."""
     
     def __init__(self, metadata: Union[str, pd.DataFrame], base_dir: str, 
-                 test_size: float = 0.5, demo_size: float = 0.02, random_state: int = 42):
+                 test_size: float = 0.5, demo_size: float = 0.02, random_state: int = 42,
+                 filter_skin_tone: Optional[int] = None):
         """
         Args:
             metadata: Either path to CSV with DDI metadata or pre-loaded DataFrame
@@ -26,16 +27,18 @@ class DDIDataLoader:
             test_size: Fraction of data to use for test set
             demo_size: Fraction of training data to use for demos
             random_state: Random seed for reproducible splits
+            filter_skin_tone: Optional skin tone value to filter dataset (e.g., 12 or 56)
         """
         self.metadata = metadata
         self.base_dir = Path(base_dir)
         self.test_size = test_size
         self.demo_size = demo_size
         self.random_state = random_state
+        self.filter_skin_tone = filter_skin_tone
         
         # Extract clean labels from prompt choices
-        self.benign_label = "benign"
-        self.malignant_label = "malignant"
+        self.benign_label = "Benign"
+        self.malignant_label = "Malignant"
         
         # Load and prepare data
         self._load_data()
@@ -63,6 +66,11 @@ class DDIDataLoader:
         
         # Validate existing labels
         self._validate_existing_labels()
+        
+        # Filter by skin tone if specified
+        if self.filter_skin_tone is not None:
+            self.df = self.df[self.df['skin_tone'] == self.filter_skin_tone].copy()
+            print(f"Filtered to skin_tone={self.filter_skin_tone}: {len(self.df)} samples")
         
         # Initial train/test split
         self.train_df, self.test_df = train_test_split(
