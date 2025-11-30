@@ -37,25 +37,30 @@ which python
 
 models=("OpenFlamingo-4B" "OpenFlamingo-3B-Instruct")
 skin_tones=("All" "12" "56")
+task_definitions=("contrastive") # "malignant_prob"
 
 for model in "${models[@]}"; do
     for skin_tone in "${skin_tones[@]}"; do
-        # Run without demos
-        echo "================================================"
-        echo "Running: $model, skin_tone=$skin_tone, no ICL"
-        echo "================================================"
-        python /home/groups/roxanad/sonnet/vcr/src/experiments/bootstrap_resample_for_pvalues.py \
-            --model "$model" \
-            --filter_skin_tone "$skin_tone"
-        
-        # Run with demos
-        echo "================================================"
-        echo "Running: $model, skin_tone=$skin_tone, with ICL"
-        echo "================================================"
-        python /home/groups/roxanad/sonnet/vcr/src/experiments/bootstrap_resample_for_pvalues.py \
-            --model "$model" \
-            --filter_skin_tone "$skin_tone" \
-            --use_demos
+        for task_definition in "${task_definitions[@]}"; do
+            # Run without demos
+            echo "================================================"
+            echo "Running: $model, skin_tone=$skin_tone, no ICL"
+            echo "================================================"
+            python /home/groups/roxanad/sonnet/vcr/src/experiments/bootstrap_resample_for_pvalues.py \
+                --model "$model" \
+                --filter_skin_tone "$skin_tone" \
+                --task_definition "$task_definition"
+            
+            # Run with demos
+            echo "================================================"
+            echo "Running: $model, skin_tone=$skin_tone, with ICL"
+            echo "================================================"
+            python /home/groups/roxanad/sonnet/vcr/src/experiments/bootstrap_resample_for_pvalues.py \
+                --model "$model" \
+                --filter_skin_tone "$skin_tone" \
+                --task_definition "$task_definition" \
+                --use_demos
+        done
     done
 done
 

@@ -82,6 +82,7 @@ class ExperimentConfig:
     demo_size: float = 0.02
     random_state: int = 42
     filter_skin_tone: Optional[int] = None
+    task_definition: str = 'malignant_prob'
     
 ##
 ## Generate top concepts for DDI dataset
@@ -190,11 +191,28 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
         prompt_batch = [prompt_template.build_prompt(demo_labels if demo_labels else None)]
         
         with torch.no_grad():
-            choice_diff = analyzer.compute_model_outputs(
-                image_batch, prompt_batch, config_dict['prompt']['completion']
-            ).item()
-        
-        choice_differences.append(choice_diff)
+            if config_dict['task_definition'] == 'contrastive':
+                completion_a = ' malignant'
+                completion_b = ' benign'
+                
+                # Compute log probabilities for both completions
+                log_prob_a = analyzer.compute_model_outputs(
+                    image_batch, prompt_batch, completion_a
+                ).item()
+                
+                log_prob_b = analyzer.compute_model_outputs(
+                    image_batch, prompt_batch, completion_b
+                ).item()
+                
+                choice_diff = log_prob_a - log_prob_b
+                
+            elif config_dict['task_definition'] == 'malignant_prob':
+                completion = ' malignant'
+                choice_diff = analyzer.compute_model_outputs(
+                    image_batch, prompt_batch, completion
+                ).item()
+            
+            choice_differences.append(choice_diff)
     
     choice_differences = np.array(choice_differences)
     np.save(seed_dir / 'choice_differences.npy', choice_differences)
@@ -267,6 +285,7 @@ def main():
                        help='Filter by skin tone: All, 12, or 56')
     parser.add_argument('--random_seeds', type=int, nargs='+', default=list(range(25)),
                        help='Random seeds to test')
+    parser.add_argument('--task_definition', type=str, default='malignant_prob',)
     args = parser.parse_args()
     
     # ===== EXPERIMENT CONFIGURATION =====
@@ -319,9 +338,9 @@ def main():
         'model_name': args.model,
         'metadata_path': '/scratch/users/sonnet/ddi/ddi_metadata.csv',
         'ddi_base_dir': "/scratch/users/sonnet/ddi",
-        'concept_files': ['/home/groups/roxanad/sonnet/vcr/src/concept_sets/google-10000-english-no-swears.txt',
-                          '/home/groups/roxanad/sonnet/vcr/src/concept_sets/medical.txt'],
+        'concept_files': ['/home/groups/roxanad/sonnet/vcr/src/concept_sets/google-10000-english-no-swears.txt'],
         'filter_skin_tone': None if args.filter_skin_tone == 'All' else int(args.filter_skin_tone),
+        'task_definition': args.task_definition if args.task_definition else 'malignant_prob',
     }
     
     # Select layer based on model

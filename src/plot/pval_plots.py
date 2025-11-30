@@ -313,7 +313,7 @@ def main(results_dir, n_concepts=20, n_images=7):
 
 if __name__ == "__main__":
     # Set your experiment directory here
-    results_dirs = '/home/groups/roxanad/sonnet/vcr/results'
+    results_dirs = '/home/groups/roxanad/sonnet/vcr/scripts'
     
     # Run analysis on all results in results_dir
     for results_dir in os.listdir(results_dirs):
