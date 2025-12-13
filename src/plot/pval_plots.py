@@ -16,7 +16,9 @@ def load_experiment_config(results_dir):
     """Load experiment configuration from experiment_config.json"""
     config_path = Path(results_dir) / "experiment_config.json"
     with open(config_path, "r") as f:
-        config = json.load(f)
+        full_config = json.load(f)
+    
+    config = full_config["config"]
     return config
 
 
@@ -66,8 +68,8 @@ def get_significant_concepts(mean_per_concept, p_values, concept_texts, n_concep
                 'p_value': p_values[idx],
                 'concept_idx': idx
             })
-        if len(positive_concepts) >= n_concepts:
-            break
+        # if len(positive_concepts) >= n_concepts:
+        #     break
     
     # Get top negative (lowest mean)
     negative_concepts = []
@@ -80,8 +82,8 @@ def get_significant_concepts(mean_per_concept, p_values, concept_texts, n_concep
                 'p_value': p_values[idx],
                 'concept_idx': idx
             })
-        if len(negative_concepts) >= n_concepts:
-            break
+        # if len(negative_concepts) >= n_concepts:
+        #     break
     
     return positive_concepts, negative_concepts
 
@@ -94,14 +96,14 @@ def save_concept_tables(positive_concepts, negative_concepts, results_dir):
     # Save positive concepts
     df_pos = pd.DataFrame(positive_concepts)
     df_pos = df_pos[['rank', 'concept', 'mean_dd', 'p_value']]
-    pos_path = output_dir / "top_20_positive_concepts.csv"
+    pos_path = output_dir / f"top_{str(len(positive_concepts))}_positive_concepts.csv"
     df_pos.to_csv(pos_path, index=False)
     print(f"Saved: {pos_path}")
     
     # Save negative concepts
     df_neg = pd.DataFrame(negative_concepts)
     df_neg = df_neg[['rank', 'concept', 'mean_dd', 'p_value']]
-    neg_path = output_dir / "top_20_negative_concepts.csv"
+    neg_path = output_dir / f"top_{str(len(negative_concepts))}_negative_concepts.csv"
     df_neg.to_csv(neg_path, index=False)
     print(f"Saved: {neg_path}")
     
@@ -180,10 +182,10 @@ def prepare_image_paths(config, seed=0):
         seed: Random seed to use (default 0 for seed_0 folder similarity matrix)
     """
     metadata_path = config['metadata_path']
-    base_dir = config['data_base_dir']
+    base_dir = config['ddi_base_dir']
     test_size = config['test_size']
     demo_size = config['demo_size']
-    use_demos = config['prompt_config'].get('use_demos', False)
+    use_demos = config['prompt'].get('use_demos', False)
     
     # Load metadata
     df = pd.read_csv(metadata_path, index_col=0)
@@ -250,7 +252,11 @@ def main(results_dir, n_concepts=20, n_images=7):
     
     # Load experiment config
     print("\n1. Loading experiment configuration...")
-    exp_config = load_experiment_config(results_dir)
+    try:
+        exp_config = load_experiment_config(results_dir)
+    except Exception as e:
+        print(f"Error loading experiment config: {e}")
+        return
     
     # Load directional derivatives
     print("\n2. Loading mean directional derivatives...")
@@ -313,11 +319,25 @@ def main(results_dir, n_concepts=20, n_images=7):
 
 if __name__ == "__main__":
     # Set your experiment directory here
-    results_dirs = '/home/groups/roxanad/sonnet/vcr/scripts'
+    # results_dirs = '/home/groups/roxanad/sonnet/vcr/scripts'
+    results_dirs = "/home/groups/roxanad/sonnet/vcr/scripts/contrastive_10k"
     
     # Run analysis on all results in results_dir
     for results_dir in os.listdir(results_dirs):
+    # for results_dir in ["/home/groups/roxanad/sonnet/vcr/scripts/contrastive_10k", "/home/groups/roxanad/sonnet/vcr/scripts/malig_prob10k"]:
         full_path = os.path.join(results_dirs, results_dir)
         analysis_path = os.path.join(full_path, 'analysis_outputs')
-        if os.path.isdir(full_path) and not os.path.exists(analysis_path):
-            main(full_path, n_concepts=20, n_images=7)
+        # if os.path.isdir(full_path) and not os.path.exists(analysis_path):
+        #     main(full_path, n_concepts=20, n_images=7)
+        main(full_path, n_concepts=50, n_images=7)
+
+    results_dirs = "/home/groups/roxanad/sonnet/vcr/scripts/malig_prob10k"
+    
+    # Run analysis on all results in results_dir
+    for results_dir in os.listdir(results_dirs):
+    # for results_dir in ["/home/groups/roxanad/sonnet/vcr/scripts/contrastive_10k", "/home/groups/roxanad/sonnet/vcr/scripts/malig_prob10k"]:
+        full_path = os.path.join(results_dirs, results_dir)
+        analysis_path = os.path.join(full_path, 'analysis_outputs')
+        # if os.path.isdir(full_path) and not os.path.exists(analysis_path):
+        #     main(full_path, n_concepts=20, n_images=7)
+        main(full_path, n_concepts=50, n_images=7)

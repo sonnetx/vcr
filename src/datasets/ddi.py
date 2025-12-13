@@ -37,8 +37,8 @@ class DDIDataLoader:
         self.filter_skin_tone = filter_skin_tone
         
         # Extract clean labels from prompt choices
-        self.benign_label = "Benign"
-        self.malignant_label = "Malignant"
+        self.benign_label = "benign"
+        self.malignant_label = "malignant"
         
         # Load and prepare data
         self._load_data()

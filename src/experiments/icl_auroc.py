@@ -1,7 +1,8 @@
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
 import sys
-sys.path.append(os.path.abspath(os.path.join(os.getcwd(), '..')))
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import traceback
 from tqdm import tqdm
@@ -15,9 +16,9 @@ from sklearn.metrics import roc_auc_score
 class DDIExperiment:
     def __init__(
         self,
-        base_directory: str = "/home/joseph/datasets/ddi/ddidiversedermatologyimages/",
-        demo_metadata_path: str = "/home/joseph/biasICL/ddi_demo_metadata.csv",
-        test_metadata_path: str = "/home/joseph/biasICL/ddi_test_metadata.csv",
+        base_directory: str = "/scratch/users/sonnet/ddi/",
+        demo_metadata_path: str = "/home/groups/roxanad/sonnet/icl/ManyICL/ManyICL/dataset/DDI/ddi_demo.csv",
+        test_metadata_path: str = "/home/groups/roxanad/sonnet/icl/ManyICL/ManyICL/dataset/DDI/ddi_test.csv",
         filter_rare: bool = False,
         flip_labels: bool = False,
     ):
@@ -47,23 +48,57 @@ class DDIExperiment:
 
     def create_demo(self, fst12_ben, fst12_mal, fst56_ben, fst56_mal, random_state=42):
         """Create demonstration examples frame from the dataset."""
-        demo_frame = pd.read_csv(self.demo_metadata_path, index_col=0)
+        demo_metadata = pd.read_csv(self.demo_metadata_path, index_col=0)
         total_samples = fst12_ben + fst12_mal + fst56_ben + fst56_mal
         
-        fst56_frame = demo_frame[demo_frame.skin_tone == 56]
-        fst56_mal_frame = fst56_frame[fst56_frame.malignant == True].sample(fst56_mal, random_state=random_state)
-        fst56_ben_frame = fst56_frame[fst56_frame.malignant == False].sample(fst56_ben, random_state=random_state)
+        selected_frames = []
+
+        fst56_data = demo_metadata[demo_metadata.skin_tone == 56]
         
-        fst12_frame = demo_frame[demo_frame.skin_tone == 12]
-        fst12_mal_frame = fst12_frame[fst12_frame.malignant == True].sample(fst12_mal, random_state=random_state)
-        fst12_ben_frame = fst12_frame[fst12_frame.malignant == False].sample(fst12_ben, random_state=random_state)
+        fst56_mal_population = fst56_data[fst56_data.malignant == True]
+        actual_fst56_mal_size = min(fst56_mal, len(fst56_mal_population))
         
-        final_demo_frame = pd.concat([
-            fst56_mal_frame,
-            fst56_ben_frame,
-            fst12_mal_frame,
-            fst12_ben_frame
-        ]).sample(total_samples, random_state=random_state)
+        fst56_mal_frame = fst56_mal_population.sample(
+            n=actual_fst56_mal_size, 
+            random_state=random_state
+        )
+        selected_frames.append(fst56_mal_frame)
+
+        fst56_ben_population = fst56_data[fst56_data.malignant == False]
+        actual_fst56_ben_size = min(fst56_ben, len(fst56_ben_population))
+        
+        fst56_ben_frame = fst56_ben_population.sample(
+            n=actual_fst56_ben_size, 
+            random_state=random_state
+        )
+        selected_frames.append(fst56_ben_frame)
+
+        fst12_data = demo_metadata[demo_metadata.skin_tone == 12]
+
+        fst12_mal_population = fst12_data[fst12_data.malignant == True]
+        actual_fst12_mal_size = min(fst12_mal, len(fst12_mal_population))
+        
+        fst12_mal_frame = fst12_mal_population.sample(
+            n=actual_fst12_mal_size, 
+            random_state=random_state
+        )
+        selected_frames.append(fst12_mal_frame)
+        
+        fst12_ben_population = fst12_data[fst12_data.malignant == False]
+        actual_fst12_ben_size = min(fst12_ben, len(fst12_ben_population))
+        
+        fst12_ben_frame = fst12_ben_population.sample(
+            n=actual_fst12_ben_size, 
+            random_state=random_state
+        )
+        selected_frames.append(fst12_ben_frame)
+
+        combined_frame = pd.concat(selected_frames)
+        
+        final_demo_frame = combined_frame.sample(
+            n=len(combined_frame), 
+            random_state=random_state
+        )
         
         return final_demo_frame
 
@@ -74,12 +109,12 @@ class DDIExperiment:
         output_dir: str,
         benign_multiplier: int = 3,
         random_state: int = 42,
-        num_qns_per_round: int = 1
+        num_qns_per_round: int = 1,
+        model="OpenFlamingo-4B",
     ):
         """Run a single experiment with specified parameters."""
         print('Building Model')
-        api = FlamingoAPI(model_name='OpenFlamingo-4B')
-#        api = FlamingoAPI()        
+        api = FlamingoAPI(model_name=model)
         CHOICES = ["Benign", "Malignant"]
         EXP_NAME = f"ddi_NormalLabel_{num_malignant}_{skin_type}_b{benign_multiplier}_s{random_state}"
         
@@ -198,14 +233,15 @@ class DDIExperiment:
         max_malignant: int = 5,
         random_seeds: range = range(5),
         skin_types: list = [12, 56, 'both'],
-        base_output_dir: str = 'results'
+        base_output_dir: str = 'results',
+        model='OpenFlamingo-4B'
     ):
         """Run full suite of experiments with different parameters."""
         
         results = {}
         
         # Create experiment directory
-        exp_dir = os.path.join(base_output_dir, "OLD_VERSION_ddi_ICL_auroc_4B")
+        exp_dir = os.path.join(base_output_dir, f"{model}_{''.join(str(s) for s in skin_types)}_{max_malignant}")
         os.makedirs(exp_dir, exist_ok=True)
         
         # Run experiments
@@ -216,7 +252,8 @@ class DDIExperiment:
                         num_malignant=num_malignant,
                         skin_type=skin_type,
                         random_state=seed,
-                        output_dir=exp_dir
+                        output_dir=exp_dir,
+                        model=model
                     )
                     results[exp_name] = exp_results
                     
@@ -229,19 +266,23 @@ class DDIExperiment:
 
 def main():
     # Create base results directory
-    base_output_dir = 'results'
+    base_output_dir = '/scratch/users/sonnet/vcr/icl_auroc'
     os.makedirs(base_output_dir, exist_ok=True)
     
     # Initialize experiment
     experiment = DDIExperiment(filter_rare=False)
     
-    # Run experiments
-    results = experiment.run_all_experiments(
-        max_malignant=20,
-        random_seeds=range(3),
-        skin_types=['both'],
-        base_output_dir=base_output_dir
-    )
+    models = ['OpenFlamingo-4B', 'OpenFlamingo-3B-Instruct']
+    skin_types_exps = [12, 56, 'both']
+    for model in models:
+        for skin_type in skin_types_exps:
+            experiment.run_all_experiments(
+                max_malignant=20,
+                random_seeds=range(3),
+                skin_types=[skin_type],
+                base_output_dir=base_output_dir,
+                model=model
+            )
 
 if __name__ == "__main__":
     main()

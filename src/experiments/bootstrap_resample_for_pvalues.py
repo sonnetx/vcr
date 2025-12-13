@@ -129,8 +129,8 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
         filter_skin_tone=config_dict.get('filter_skin_tone'),
     )
     
-    data_loader.benign_label = "Benign"
-    data_loader.malignant_label = "Malignant"
+    data_loader.benign_label = "benign"
+    data_loader.malignant_label = "malignant"
     
     print(f"Dataset info for seed {random_seed}:", data_loader.get_info())
     
@@ -277,7 +277,7 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Run VCR experiment with DDI dataset')
     parser.add_argument('--model', type=str, default='OpenFlamingo-3B-Instruct',
-                       choices=['OpenFlamingo-3B-Instruct', 'OpenFlamingo-4B'],
+                       choices=['OpenFlamingo-3B-Instruct', 'OpenFlamingo-4B', 'MedFlamingo'],
                        help='Model to use')
     parser.add_argument('--use_demos', action='store_true',
                        help='Use in-context learning demos')
@@ -301,7 +301,7 @@ def main():
             ),
         demo_template="<image>\nThe lesion is {label}.\n\n",
         query_template="<image>\nThe lesion is", ## since the query ends w/o a space, start choices w/ a space
-        completion="Malignant",  # Note: leading spaces matter for tokenization
+        completion=" malignant",  # Note: leading spaces matter for tokenization
         use_demos=args.use_demos
     )
     
@@ -312,8 +312,8 @@ def main():
         Edit this function to change how labels are mapped.
         """
         # Extract clean labels from prompt choices
-        benign_label = "Benign"
-        malignant_label = "Malignant"
+        benign_label = "benign"
+        malignant_label = "malignant"
         
         # Create label column - EDIT THIS MAPPING as needed
         df['label'] = df['malignant'].map({
@@ -334,7 +334,7 @@ def main():
     demos_suffix = '_ICL' if args.use_demos else ''
     
     base_config = {
-        'results_dir': f'{args.model}_DDI{demos_suffix}_LastLayer{skin_tone_suffix}',
+        'results_dir': f'{args.model}_DDI{demos_suffix}_LastLayer{skin_tone_suffix}_{args.task_definition}',
         'model_name': args.model,
         'metadata_path': '/scratch/users/sonnet/ddi/ddi_metadata.csv',
         'ddi_base_dir': "/scratch/users/sonnet/ddi",
@@ -346,7 +346,7 @@ def main():
     # Select layer based on model
     if args.model == 'OpenFlamingo-4B':
         layer_name = 'model.lang_encoder.gpt_neox.layers.31.decoder_layer'
-    else:  # OpenFlamingo-3B-Instruct
+    elif args.model ==  'OpenFlamingo-3B-Instruct':
         layer_name = 'model.lang_encoder.transformer.blocks.23.decoder_layer'
     
     # ===== END CONFIGURATION =====

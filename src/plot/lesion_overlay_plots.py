@@ -517,6 +517,13 @@ if __name__ == '__main__':
 
     results_dir = sys.argv[1]
 
+    body_part_to_image = {
+        'nose': ['000551', '000644', '000535'],
+        'scalp': ['000537', '000641', '000601', '000462', '000262'],
+        'eyebrow': ['000637', '000617'],
+        'ear': ['00129']
+    }
+
     # Generate all plots
     generate_all_plots(results_dir)
 

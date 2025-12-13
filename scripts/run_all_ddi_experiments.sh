@@ -35,9 +35,9 @@ which python
 
 # Run all combinations of model, use_demos, and filter_skin_tone
 
-models=("OpenFlamingo-4B" "OpenFlamingo-3B-Instruct")
+models=("MedFlamingo") # ("OpenFlamingo-4B" "OpenFlamingo-3B-Instruct")
 skin_tones=("All" "12" "56")
-task_definitions=("contrastive") # "malignant_prob"
+task_definitions=("contrastive" "malignant_prob") # "malignant_prob"
 
 for model in "${models[@]}"; do
     for skin_tone in "${skin_tones[@]}"; do
