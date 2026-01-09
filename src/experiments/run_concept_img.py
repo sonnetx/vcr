@@ -70,7 +70,7 @@ class FlamingoWrapper(VLMWrapper):
                 "early": "model.lang_encoder.gpt_neox.layers.7.decoder_layer",
             },
             "MedFlamingo": {
-                "last": "model.lang_encoder.transformer.blocks.23.decoder_layer",
+                "last": "model.lang_encoder.model.layers.31.decoder_layer",
                 "middle": "model.lang_encoder.transformer.blocks.11.decoder_layer",
                 "early": "model.lang_encoder.transformer.blocks.5.decoder_layer",
             },
