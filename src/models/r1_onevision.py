@@ -1,4 +1,11 @@
 import torch
+
+# Compatibility patch for torch.compiler.is_compiling
+# CRITICAL: This MUST be applied before transformers import
+# The Qwen model code calls torch.compiler.is_compiling() during model loading
+if not hasattr(torch.compiler, 'is_compiling'):
+    torch.compiler.is_compiling = lambda: False
+
 from PIL import Image
 from accelerate import Accelerator
 from transformers import AutoProcessor
@@ -14,20 +21,16 @@ class R1OnevisionAPI:
         hf_token=None,
     ):
         """
-        Initialize R1-Onevision model - a reasoning-enhanced multimodal model
-
         Args:
             model_name: Model variant to use. Options:
                 - 'R1-Onevision-7B': 7B reasoning model (default)
-                - 'R1-Onevision-3B': 3B reasoning model
-                - 'R1-Onevision-32B': 32B reasoning model
             hf_token: Hugging Face authentication token (optional)
                      Get yours at https://huggingface.co/settings/tokens
                      Or use: huggingface-cli login
         """
 
         valid_models = {
-            'R1-Onevision-3B', 'R1-Onevision-7B', 'R1-Onevision-32B'
+            'R1-Onevision-7B'
         }
         assert model_name in valid_models, f"Error: Model '{model_name}' is not implemented. Valid models are: {', '.join(valid_models)}"
 
@@ -37,15 +40,12 @@ class R1OnevisionAPI:
 
         # Model ID mapping
         model_id_map = {
-            'R1-Onevision-3B': 'Fancy-MLLM/R1-Onevision-3B',
             'R1-Onevision-7B': 'Fancy-MLLM/R1-Onevision-7B',
-            'R1-Onevision-32B': 'Fancy-MLLM/R1-Onevision-32B',
         }
 
         self.model_id = model_id_map[model_name]
         self.hf_token = hf_token
 
-        # Check for authentication (optional for this model)
         if self.hf_token is None:
             self.hf_token = os.environ.get('HUGGING_FACE_HUB_TOKEN') or os.environ.get('HF_TOKEN')
 
@@ -60,76 +60,27 @@ class R1OnevisionAPI:
         try:
             self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 self.model_id,
-                torch_dtype=torch.bfloat16,
+                dtype=torch.bfloat16,
                 device_map="auto",
                 trust_remote_code=True,
                 token=self.hf_token,
             )
+            # Enable gradient checkpointing to reduce memory during backward pass
+            if hasattr(self.model, 'gradient_checkpointing_enable'):
+                self.model.gradient_checkpointing_enable()
+                print("✓ Gradient checkpointing enabled")
             print("✓ Model loaded successfully")
         except Exception as model_error:
             print(f"Error loading model: {model_error}")
             raise
 
-        # Load processor - use a fallback approach if AutoProcessor fails
         print("\nLoading processor...")
-        try:
-            self.processor = AutoProcessor.from_pretrained(
-                self.model_id,
-                trust_remote_code=True,
-                token=self.hf_token,
-            )
-            print("✓ Processor loaded with AutoProcessor")
-        except Exception as e:
-            print(f"AutoProcessor failed: {str(e)[:100]}...")
-            print("Building processor from components...")
-
-            # Manually build processor from Qwen2.5-VL components
-            from transformers import AutoTokenizer as _AutoTokenizer
-
-            try:
-                tokenizer = _AutoTokenizer.from_pretrained(
-                    self.model_id,
-                    trust_remote_code=True,
-                    token=self.hf_token,
-                )
-                print("✓ Tokenizer loaded")
-
-                # Use the base Qwen2.5-VL processor as a template
-                # This works because R1-Onevision is fine-tuned from Qwen2.5-VL
-                base_qwen_model = "Qwen/Qwen2.5-VL-7B-Instruct"
-                print(f"Using processor from base model: {base_qwen_model}")
-
-                try:
-                    base_processor = AutoProcessor.from_pretrained(
-                        base_qwen_model,
-                        trust_remote_code=True,
-                    )
-                    # Replace tokenizer with the one from R1-Onevision
-                    base_processor.tokenizer = tokenizer
-                    self.processor = base_processor
-                    print("✓ Built processor from Qwen2.5-VL base + R1-Onevision tokenizer")
-                except Exception as e2:
-                    print(f"Base processor also failed: {str(e2)[:100]}...")
-                    # Last resort: create minimal processor wrapper
-                    class MinimalProcessor:
-                        def __init__(self, tokenizer):
-                            self.tokenizer = tokenizer
-
-                        def apply_chat_template(self, messages, **kwargs):
-                            return self.tokenizer.apply_chat_template(messages, **kwargs)
-
-                        def __call__(self, text=None, images=None, videos=None, **kwargs):
-                            return self.tokenizer(text, **kwargs) if text else {}
-
-                        def batch_decode(self, *args, **kwargs):
-                            return self.tokenizer.batch_decode(*args, **kwargs)
-
-                    self.processor = MinimalProcessor(tokenizer)
-                    print("✓ Using minimal processor wrapper")
-
-            except Exception as tokenizer_error:
-                print(f"Failed to load tokenizer: {tokenizer_error}")
-                raise
+        self.processor = AutoProcessor.from_pretrained(
+            self.model_id,
+            trust_remote_code=True,
+            token=self.hf_token,
+        )
+        print("✓ Processor loaded successfully")
 
         # Get tokenizer
         self.tokenizer = self.processor.tokenizer
@@ -190,7 +141,7 @@ class R1OnevisionAPI:
     def extract_reasoning(self, text: str) -> Tuple[str, str]:
         """
         Extract reasoning and final answer from model output.
-        R1 models often use <think>...</think> tags or similar patterns for reasoning.
+        R1-Onevision uses <think> and <answer> tags to separate reasoning from final answer.
 
         Args:
             text: Raw model output
@@ -198,16 +149,46 @@ class R1OnevisionAPI:
         Returns:
             Tuple of (reasoning, final_answer)
         """
-        # Pattern 1: Look for <think>...</think> tags
-        think_pattern = r'<think>(.*?)</think>'
-        think_match = re.search(think_pattern, text, re.DOTALL)
+        # Pattern 1: Look for <think> and <answer> tags (R1-Onevision format)
+        # Format: <think>reasoning here<answer>final answer here
+        think_answer_pattern = r'<think>(.*?)<answer>(.*?)(?:</answer>|$)'
+        think_answer_match = re.search(think_answer_pattern, text, re.DOTALL)
 
-        if think_match:
-            reasoning = think_match.group(1).strip()
-            final_answer = re.sub(think_pattern, '', text, flags=re.DOTALL).strip()
+        if think_answer_match:
+            reasoning = think_answer_match.group(1).strip()
+            final_answer = think_answer_match.group(2).strip()
             return reasoning, final_answer
 
-        # Pattern 2: Look for explicit "Reasoning:" or "Analysis:" sections
+        # Pattern 2: Look for <think> tag only (no <answer> tag)
+        # In this case, everything after <think> is reasoning, and we extract conclusion
+        think_only_pattern = r'<think>(.*?)$'
+        think_only_match = re.search(think_only_pattern, text, re.DOTALL)
+
+        if think_only_match:
+            reasoning = think_only_match.group(1).strip()
+            # Try to extract final answer from reasoning using conclusion markers
+            conclusion_pattern = r'(.*?)(?:Therefore|Thus|In conclusion|To summarize|Final answer)[,:]?\s*(.*?)$'
+            conclusion_match = re.search(conclusion_pattern, reasoning, re.DOTALL | re.IGNORECASE)
+            if conclusion_match and conclusion_match.group(2).strip():
+                final_answer = conclusion_match.group(2).strip()
+                reasoning = conclusion_match.group(1).strip()
+            else:
+                # No clear conclusion, return last sentence/paragraph as answer
+                final_answer = reasoning.split('.')[-1].strip() if '.' in reasoning else reasoning
+            return reasoning, final_answer
+
+        # Pattern 3: Legacy <think>...</think> tags (for backwards compatibility)
+        think_closing_pattern = r'<think>(.*?)</think>(.*?)$'
+        think_closing_match = re.search(think_closing_pattern, text, re.DOTALL)
+
+        if think_closing_match:
+            reasoning = think_closing_match.group(1).strip()
+            final_answer = think_closing_match.group(2).strip()
+            if not final_answer:
+                final_answer = text
+            return reasoning, final_answer
+
+        # Pattern 4: Look for explicit "Reasoning:" or "Analysis:" sections
         reasoning_patterns = [
             r'(?:Reasoning|Analysis|Thought process):\s*(.*?)(?:\n\n|$)(.*)',
             r'(?:Let me think|Let\'s think).*?\.\s*(.*?)(?:\n\n|$)(.*)',
@@ -220,7 +201,7 @@ class R1OnevisionAPI:
                 final_answer = match.group(2).strip() if len(match.groups()) > 1 else text
                 return reasoning, final_answer
 
-        # Pattern 3: If no explicit reasoning markers, try to split by common patterns
+        # Pattern 5: If no explicit reasoning markers, try to split by common patterns
         # Look for transitions like "Therefore", "Thus", "In conclusion"
         conclusion_pattern = r'(.*?)(?:Therefore|Thus|In conclusion|To summarize|Final answer)[,:]?\s*(.*)'
         conclusion_match = re.search(conclusion_pattern, text, re.DOTALL | re.IGNORECASE)
@@ -243,7 +224,6 @@ class R1OnevisionAPI:
         for choice in choices:
             full_text = f"{prompt} {choice}"
 
-            # Prepare messages in Qwen2VL format
             messages = [
                 {
                     "role": "user",
@@ -251,20 +231,17 @@ class R1OnevisionAPI:
                 }
             ]
 
-            # Add images
             for img in images:
                 messages[0]["content"].append({
                     "type": "image",
                     "image": img
                 })
 
-            # Add text
             messages[0]["content"].append({
                 "type": "text",
                 "text": full_text
             })
 
-            # Process inputs
             try:
                 # Try using qwen_vl_utils if available
                 try:
@@ -295,10 +272,8 @@ class R1OnevisionAPI:
                 with torch.no_grad():
                     outputs = self.model(**inputs)
 
-                # Calculate log probabilities
                 logits = outputs.logits[0]
 
-                # Find where choice starts
                 prompt_only_messages = [
                     {
                         "role": "user",
@@ -394,17 +369,14 @@ class R1OnevisionAPI:
 
         images = self.preprocess_images(image_paths) if image_paths else []
 
-        # Prepare messages in Qwen2VL format
         messages = []
 
-        # Add system prompt if provided
         if system_prompt:
             messages.append({
                 "role": "system",
                 "content": [{"type": "text", "text": system_prompt}]
             })
 
-        # Add user message with images and text
         user_content = []
         for img in images:
             user_content.append({
@@ -421,7 +393,6 @@ class R1OnevisionAPI:
             "content": user_content
         })
 
-        # Process inputs
         try:
             # Try using qwen_vl_utils if available
             try:
@@ -442,7 +413,6 @@ class R1OnevisionAPI:
                 ).to(self.device)
             except ImportError:
                 print("Warning: qwen_vl_utils not found, using fallback processing")
-                # Fallback: Use processor directly
                 inputs = self.processor(
                     text=messages,
                     images=images if images else None,
@@ -453,7 +423,6 @@ class R1OnevisionAPI:
             print(f"Error during input processing: {e}")
             raise
 
-        # Generate
         with torch.no_grad():
             generated = self.model.generate(
                 **inputs,
@@ -468,12 +437,10 @@ class R1OnevisionAPI:
                 eos_token_id=self.tokenizer.eos_token_id,
             )
 
-        # Decode the output
         input_length = inputs["input_ids"].shape[1]
         new_tokens = generated[0][input_length:]
         full_output = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
-        # Extract reasoning and final answer
         if return_reasoning:
             reasoning, answer = self.extract_reasoning(full_output)
             return {

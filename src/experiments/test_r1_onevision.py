@@ -142,7 +142,7 @@ if __name__ == "__main__":
 
     model = test_basic_initialization()
     if model:
-        test_model_output_formats()
+        test_model_output_formats(model)
 
     print("\n" + "="*70)
     print("Test Suite Complete!")
