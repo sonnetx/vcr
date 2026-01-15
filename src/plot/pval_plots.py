@@ -5,11 +5,13 @@ import numpy as np
 from scipy import stats
 from pathlib import Path
 import os
+import sys
 import json
 import pandas as pd
 import matplotlib.pyplot as plt
 from PIL import Image
 from sklearn.model_selection import train_test_split
+import argparse
 
 
 def load_experiment_config(results_dir):
@@ -68,8 +70,8 @@ def get_significant_concepts(mean_per_concept, p_values, concept_texts, n_concep
                 'p_value': p_values[idx],
                 'concept_idx': idx
             })
-        # if len(positive_concepts) >= n_concepts:
-        #     break
+        if len(positive_concepts) >= n_concepts:
+            break
     
     # Get top negative (lowest mean)
     negative_concepts = []
@@ -82,8 +84,8 @@ def get_significant_concepts(mean_per_concept, p_values, concept_texts, n_concep
                 'p_value': p_values[idx],
                 'concept_idx': idx
             })
-        # if len(negative_concepts) >= n_concepts:
-        #     break
+        if len(negative_concepts) >= n_concepts:
+            break
     
     return positive_concepts, negative_concepts
 
@@ -243,101 +245,254 @@ def generate_visualizations_for_concepts(concepts, sim_matrix, probe_paths,
 
 
 def main(results_dir, n_concepts=20, n_images=7):
-    """Main analysis pipeline"""
+    """Main analysis pipeline with comprehensive error handling"""
     results_dir = Path(results_dir)
-    
+
     print("="*60)
     print(f"Starting analysis for: {results_dir}")
     print("="*60)
-    
-    # Load experiment config
-    print("\n1. Loading experiment configuration...")
+
     try:
-        exp_config = load_experiment_config(results_dir)
+        # Load experiment config
+        print("\n1. Loading experiment configuration...")
+        try:
+            exp_config = load_experiment_config(results_dir)
+        except FileNotFoundError:
+            print(f"ERROR: experiment_config.json not found in {results_dir}")
+            print("Skipping this directory...")
+            return False
+        except json.JSONDecodeError:
+            print(f"ERROR: Invalid JSON in experiment_config.json")
+            print("Skipping this directory...")
+            return False
+        except Exception as e:
+            print(f"ERROR: Failed to load experiment config: {e}")
+            print("Skipping this directory...")
+            return False
+
+        # Load directional derivatives
+        print("\n2. Loading mean directional derivatives...")
+        try:
+            mean_directional_derivatives = load_mean_directional_derivatives(results_dir)
+            print(f"   Shape: {mean_directional_derivatives.shape}")
+        except Exception as e:
+            print(f"ERROR: Failed to load directional derivatives: {e}")
+            print("Skipping this directory...")
+            return False
+
+        # Compute statistics
+        print("\n3. Computing statistics...")
+        try:
+            t_stats, p_values = compute_statistics(mean_directional_derivatives)
+            mean_per_concept = np.mean(mean_directional_derivatives, axis=0)
+
+            n_total = len(p_values)
+            n_significant = ((p_values * n_total) < 0.05).sum()
+            print(f"   Total concepts: {n_total}")
+            print(f"   Significant concepts (Bonferroni corrected): {n_significant}")
+        except Exception as e:
+            print(f"ERROR: Failed to compute statistics: {e}")
+            print("Skipping this directory...")
+            return False
+
+        # Load concept texts
+        print("\n4. Loading concept texts...")
+        try:
+            concept_texts_path = results_dir / "seed_0" / "concept_texts.json"
+            with open(concept_texts_path, "r") as f:
+                concept_texts = json.load(f)
+        except FileNotFoundError:
+            print(f"ERROR: concept_texts.json not found at {concept_texts_path}")
+            print("Skipping this directory...")
+            return False
+        except Exception as e:
+            print(f"ERROR: Failed to load concept texts: {e}")
+            print("Skipping this directory...")
+            return False
+
+        # Get significant concepts
+        print(f"\n5. Extracting top {n_concepts} significant concepts...")
+        try:
+            positive_concepts, negative_concepts = get_significant_concepts(
+                mean_per_concept, p_values, concept_texts, n_concepts=n_concepts
+            )
+            print(f"   Found {len(positive_concepts)} positive and {len(negative_concepts)} negative concepts")
+        except Exception as e:
+            print(f"ERROR: Failed to extract significant concepts: {e}")
+            print("Skipping this directory...")
+            return False
+
+        # Save tables
+        print("\n6. Saving concept tables to CSV...")
+        try:
+            output_dir = save_concept_tables(positive_concepts, negative_concepts, results_dir)
+        except Exception as e:
+            print(f"ERROR: Failed to save concept tables: {e}")
+            print("Skipping this directory...")
+            return False
+
+        # Prepare image paths
+        print("\n7. Preparing image paths...")
+        try:
+            # Use seed 0 to match the seed_0 folder from which we load similarity_matrix
+            probe_paths = prepare_image_paths(exp_config, seed=0)
+            print(f"   Loaded {len(probe_paths)} probe images")
+        except Exception as e:
+            print(f"ERROR: Failed to prepare image paths: {e}")
+            print("Skipping this directory...")
+            return False
+
+        # Load similarity matrix
+        print("\n8. Loading similarity matrix...")
+        try:
+            sim_matrix_path = results_dir / "seed_0" / "similarity_matrix.npy"
+            sim_matrix = np.load(sim_matrix_path)
+            print(f"   Shape: {sim_matrix.shape}")
+        except FileNotFoundError:
+            print(f"ERROR: similarity_matrix.npy not found at {sim_matrix_path}")
+            print("Skipping this directory...")
+            return False
+        except Exception as e:
+            print(f"ERROR: Failed to load similarity matrix: {e}")
+            print("Skipping this directory...")
+            return False
+
+        # Generate visualizations
+        print(f"\n9. Generating visualizations ({n_images} images per concept)...")
+        try:
+            print("   Positive concepts:")
+            generate_visualizations_for_concepts(
+                positive_concepts, sim_matrix, probe_paths, concept_texts, output_dir, n_images
+            )
+            print("   Negative concepts:")
+            generate_visualizations_for_concepts(
+                negative_concepts, sim_matrix, probe_paths, concept_texts, output_dir, n_images
+            )
+        except Exception as e:
+            print(f"WARNING: Failed to generate some visualizations: {e}")
+            print("Continuing anyway...")
+
+        print("\n" + "="*60)
+        print("Analysis complete!")
+        print(f"Results saved to: {output_dir}")
+        print("="*60)
+        return True
+
     except Exception as e:
-        print(f"Error loading experiment config: {e}")
-        return
-    
-    # Load directional derivatives
-    print("\n2. Loading mean directional derivatives...")
-    mean_directional_derivatives = load_mean_directional_derivatives(results_dir)
-    print(f"   Shape: {mean_directional_derivatives.shape}")
-    
-    # Compute statistics
-    print("\n3. Computing statistics...")
-    t_stats, p_values = compute_statistics(mean_directional_derivatives)
-    mean_per_concept = np.mean(mean_directional_derivatives, axis=0)
-    
-    n_total = len(p_values)
-    n_significant = ((p_values * n_total) < 0.05).sum()
-    print(f"   Total concepts: {n_total}")
-    print(f"   Significant concepts (Bonferroni corrected): {n_significant}")
-    
-    # Load concept texts
-    print("\n4. Loading concept texts...")
-    with open(results_dir / "seed_0" / "concept_texts.json", "r") as f:
-        concept_texts = json.load(f)
-    
-    # Get significant concepts
-    print(f"\n5. Extracting top {n_concepts} significant concepts...")
-    positive_concepts, negative_concepts = get_significant_concepts(
-        mean_per_concept, p_values, concept_texts, n_concepts=n_concepts
-    )
-    print(f"   Found {len(positive_concepts)} positive and {len(negative_concepts)} negative concepts")
-    
-    # Save tables
-    print("\n6. Saving concept tables to CSV...")
-    output_dir = save_concept_tables(positive_concepts, negative_concepts, results_dir)
-    
-    # Prepare image paths
-    print("\n7. Preparing image paths...")
-    # Use seed 0 to match the seed_0 folder from which we load similarity_matrix
-    probe_paths = prepare_image_paths(exp_config, seed=0)
-    print(f"   Loaded {len(probe_paths)} probe images")
-    
-    # Load similarity matrix
-    print("\n8. Loading similarity matrix...")
-    sim_matrix = np.load(results_dir / "seed_0" / "similarity_matrix.npy")
-    print(f"   Shape: {sim_matrix.shape}")
-    
-    # Generate visualizations
-    print(f"\n9. Generating visualizations ({n_images} images per concept)...")
-    print("   Positive concepts:")
-    generate_visualizations_for_concepts(
-        positive_concepts, sim_matrix, probe_paths, concept_texts, output_dir, n_images
-    )
-    print("   Negative concepts:")
-    generate_visualizations_for_concepts(
-        negative_concepts, sim_matrix, probe_paths, concept_texts, output_dir, n_images
-    )
-    
-    print("\n" + "="*60)
-    print("Analysis complete!")
-    print(f"Results saved to: {output_dir}")
-    print("="*60)
+        print(f"\nUNEXPECTED ERROR: {e}")
+        print("Skipping this directory...")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def should_include_folder(folder_name):
+    """Check if folder should be included based on suffix"""
+    folder_lower = folder_name.lower()
+    return 'contrastive' in folder_lower or 'malignant_prob' in folder_lower or 'malig_prob' in folder_lower
 
 
 if __name__ == "__main__":
-    # Set your experiment directory here
-    # results_dirs = '/home/groups/roxanad/sonnet/vcr/scripts'
-    results_dirs = "/home/groups/roxanad/sonnet/vcr/scripts/contrastive_10k"
-    
-    # Run analysis on all results in results_dir
-    for results_dir in os.listdir(results_dirs):
-    # for results_dir in ["/home/groups/roxanad/sonnet/vcr/scripts/contrastive_10k", "/home/groups/roxanad/sonnet/vcr/scripts/malig_prob10k"]:
-        full_path = os.path.join(results_dirs, results_dir)
-        analysis_path = os.path.join(full_path, 'analysis_outputs')
-        # if os.path.isdir(full_path) and not os.path.exists(analysis_path):
-        #     main(full_path, n_concepts=20, n_images=7)
-        main(full_path, n_concepts=50, n_images=7)
+    parser = argparse.ArgumentParser(
+        description='Analyze concept significance and generate visualizations from experimental results.'
+    )
+    parser.add_argument(
+        'results_dirs',
+        nargs='*',
+        default=["/home/groups/roxanad/sonnet/vcr/scripts/contrastive_10k",
+                 "/home/groups/roxanad/sonnet/vcr/scripts/malig_prob10k"],
+        help='Directories containing experiment results. Can specify multiple directories.'
+    )
+    parser.add_argument(
+        '--n-concepts',
+        type=int,
+        default=50,
+        help='Number of top concepts to extract (default: 50)'
+    )
+    parser.add_argument(
+        '--n-images',
+        type=int,
+        default=7,
+        help='Number of images per concept visualization (default: 7)'
+    )
+    parser.add_argument(
+        '--skip-existing',
+        action='store_true',
+        help='Skip directories that already have analysis_outputs folder'
+    )
 
-    results_dirs = "/home/groups/roxanad/sonnet/vcr/scripts/malig_prob10k"
-    
-    # Run analysis on all results in results_dir
-    for results_dir in os.listdir(results_dirs):
-    # for results_dir in ["/home/groups/roxanad/sonnet/vcr/scripts/contrastive_10k", "/home/groups/roxanad/sonnet/vcr/scripts/malig_prob10k"]:
-        full_path = os.path.join(results_dirs, results_dir)
-        analysis_path = os.path.join(full_path, 'analysis_outputs')
-        # if os.path.isdir(full_path) and not os.path.exists(analysis_path):
-        #     main(full_path, n_concepts=20, n_images=7)
-        main(full_path, n_concepts=50, n_images=7)
+    args = parser.parse_args()
+
+    # Track statistics
+    total_processed = 0
+    total_success = 0
+    total_skipped = 0
+    total_failed = 0
+
+    # Process each results directory
+    for results_dirs in args.results_dirs:
+        results_dirs = Path(results_dirs)
+
+        if not results_dirs.exists():
+            print(f"WARNING: Directory does not exist: {results_dirs}")
+            continue
+
+        if not results_dirs.is_dir():
+            print(f"WARNING: Not a directory: {results_dirs}")
+            continue
+
+        print(f"\n{'='*80}")
+        print(f"Processing parent directory: {results_dirs}")
+        print(f"{'='*80}\n")
+
+        # Get all subdirectories
+        try:
+            subdirs = [d for d in os.listdir(results_dirs) if os.path.isdir(os.path.join(results_dirs, d))]
+        except Exception as e:
+            print(f"ERROR: Failed to list directory {results_dirs}: {e}")
+            continue
+
+        # Filter subdirectories
+        filtered_subdirs = [d for d in subdirs if should_include_folder(d)]
+
+        if not filtered_subdirs:
+            print(f"No matching subdirectories found in {results_dirs}")
+            print("Looking for folders containing 'contrastive' or 'malignant_prob' or 'malig_prob'")
+            continue
+
+        print(f"Found {len(filtered_subdirs)} matching subdirectories (out of {len(subdirs)} total)")
+        print(f"Filtered subdirectories: {filtered_subdirs}\n")
+
+        # Process each filtered subdirectory
+        for results_dir in filtered_subdirs:
+            full_path = os.path.join(results_dirs, results_dir)
+            analysis_path = os.path.join(full_path, 'analysis_outputs')
+
+            # Check if we should skip existing
+            if args.skip_existing and os.path.exists(analysis_path):
+                print(f"Skipping {results_dir} (analysis_outputs already exists)")
+                total_skipped += 1
+                continue
+
+            total_processed += 1
+            print(f"\n[{total_processed}] Processing: {results_dir}")
+
+            # Run analysis with error handling
+            success = main(full_path, n_concepts=args.n_concepts, n_images=args.n_images)
+
+            if success:
+                total_success += 1
+            else:
+                total_failed += 1
+
+            print()  # Add spacing between runs
+
+    # Print summary
+    print(f"\n{'='*80}")
+    print("SUMMARY")
+    print(f"{'='*80}")
+    print(f"Total directories processed: {total_processed}")
+    print(f"Successful: {total_success}")
+    print(f"Failed: {total_failed}")
+    print(f"Skipped (already processed): {total_skipped}")
+    print(f"{'='*80}\n")
