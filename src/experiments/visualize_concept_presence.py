@@ -37,10 +37,22 @@ def load_results(path: str) -> Dict[str, Any]:
         return json.load(f)
 
 
-def create_heatmap(results: Dict[str, Any], output_dir: Path):
+def get_top_concepts(results: Dict[str, Any], top_k: int) -> List[str]:
+    """Get top K concepts in original VCR ranking order."""
+    concepts = [c['concept'] for c in results['concepts']]
+    return concepts[:top_k]
+
+
+def create_heatmap(results: Dict[str, Any], output_dir: Path, top_k: int = None):
     """Create heatmap showing concept presence across traces."""
     trace_analyses = results['trace_analyses']
-    concepts = [c['concept'] for c in results['concepts']]
+    all_concepts = [c['concept'] for c in results['concepts']]
+
+    # Filter to top K concepts if specified
+    if top_k is not None:
+        concepts = get_top_concepts(results, top_k)
+    else:
+        concepts = all_concepts
 
     n_traces = len(trace_analyses)
     n_concepts = len(concepts)
@@ -223,10 +235,17 @@ def create_per_trace_analysis(results: Dict[str, Any], output_dir: Path):
     plt.close()
 
 
-def create_concept_correlation_matrix(results: Dict[str, Any], output_dir: Path):
+def create_concept_correlation_matrix(results: Dict[str, Any], output_dir: Path, top_k: int = None):
     """Create correlation matrix showing which concepts co-occur."""
     trace_analyses = results['trace_analyses']
-    concepts = [c['concept'] for c in results['concepts']]
+    all_concepts = [c['concept'] for c in results['concepts']]
+
+    # Filter to top K concepts if specified
+    if top_k is not None:
+        concepts = get_top_concepts(results, top_k)
+    else:
+        concepts = all_concepts
+
     n_concepts = len(concepts)
 
     # Create co-occurrence matrix (reasoning + answer combined)
@@ -380,11 +399,11 @@ def main():
 
     # Generate visualizations
     print("Generating visualizations...")
-    create_heatmap(results, output_dir)
+    create_heatmap(results, output_dir, top_k=args.top_k)
     create_bar_chart(results, output_dir, top_k=args.top_k)
     create_venn_diagram(results, output_dir)
     create_per_trace_analysis(results, output_dir)
-    create_concept_correlation_matrix(results, output_dir)
+    create_concept_correlation_matrix(results, output_dir, top_k=args.top_k)
     generate_summary_report(results, output_dir)
 
     print()

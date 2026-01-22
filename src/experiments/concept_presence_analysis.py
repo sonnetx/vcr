@@ -55,42 +55,125 @@ def create_judge_prompt(concepts: List[str], text: str, text_type: str) -> str:
 {concept_list}
 
 **Text to analyze:**
+\"\"\"
 {text}
+\"\"\"
 
-**Instructions:**
-For each concept, determine if it is semantically present in the text. Be INCLUSIVE and mark a concept as "present" if ANY of the following apply:
+**CRITICAL INSTRUCTIONS:**
+- Analyze ONLY the text above. Do NOT look at or reference any image.
+- Your task is to find concepts in the WRITTEN TEXT, not in any visual content.
+- If a word appears in the text, it is present. If it does not appear in the text, it is absent.
 
-1. **Direct mention**: The exact word appears in the text
-   - Example: "nail" in concept list, "nail bed" or "nails" in text → mark "nail" as present
+**Step-by-step process:**
 
-2. **Synonyms or related terms**: Semantically equivalent words
-   - Example: "footwear" in concept list, "shoes" in text → mark "footwear" as present
+1. Read through the text sentence by sentence. For each sentence, note which concepts (if any) are mentioned or implied.
 
-3. **Part-whole relationships**: Text mentions something that includes or is part of the concept
-   - If text mentions "nail", "toenail", "fingernail", or "nail bed" → mark BOTH "nail" AND "nails" as present
-   - If text mentions "toe", "toenail", or "subungual" → mark "toe", "foot", "nail", and "nails" as present
-   - If text mentions body parts → mark related singular/plural forms as present
+2. A concept is "present" if the TEXT contains:
+   - The exact word or morphological variant (singular/plural, verb forms)
+   - Synonyms or semantically equivalent terms
+   - Related terms where the concept is clearly implied (e.g., "toenail" implies both "nail" and "toe")
 
-4. **Strong contextual associations**: Text discusses something strongly associated with the concept
-   - If text mentions "trauma", "pain", "infection", "lesion", or "abscess" → mark "hurt" as present
-   - If text mentions "discoloration" in nail context → mark "color" and "paint" as present
-   - If text discusses foot/toe pathology → mark "foot", "toe", "shoe" as present
+3. Be INCLUSIVE with semantic matching, but only for content actually written in the text.
 
-5. **Clinical context**: For medical texts, consider clinical relationships
-   - Nail conditions (onychomycosis, paronychia, subungual) → mark "nail", "nails", potentially "toe" or "foot"
-   - Purple coloration/marking → mark "purple" as present
+**Examples of matching:**
+- "nail" matches: nail, nails, fingernail, toenail
+- "measure" matches: measure, measured, measurement, measurements
+- "purple" matches: purple, violet, purplish
+- "foot" matches: foot, feet, sole, plantar, heel
+- "hurt" matches: pain, painful, tender, sore, injury
 
-**Key principle**: When uncertain, INCLUDE the concept rather than exclude it. We want to capture all plausible semantic connections.
-
-Return ONLY a JSON object with this format:
-{{
-  "present": ["concept1", "concept2", ...],
-  "absent": ["concept3", "concept4", ...]
-}}
-
-Do NOT include explanations or additional text outside the JSON."""
+**Work through the text systematically, then output your final answer as JSON:**
+{{"present": ["concept1", "concept2"], "absent": ["concept3", "concept4"]}}"""
 
     return prompt
+
+
+def _extract_json_from_text(text: str) -> Any:
+    """
+    Extract JSON object from text using multiple strategies.
+    Returns parsed JSON or None if extraction fails.
+    """
+    if not text or not text.strip():
+        return None
+
+    text = text.strip()
+
+    # Strategy 1: Direct JSON parsing
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Strategy 2: Extract from markdown code blocks (```json ... ``` or ``` ... ```)
+    # Capture everything between the markers and try to parse as JSON
+    code_block_patterns = [
+        r'```json\s*([\s\S]*?)\s*```',
+        r'```\s*([\s\S]*?)\s*```',
+    ]
+    for pattern in code_block_patterns:
+        matches = re.findall(pattern, text)
+        for match_content in matches:
+            content = match_content.strip()
+            if content.startswith('{'):
+                try:
+                    return json.loads(content)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+    # Strategy 3: Find JSON object with balanced braces
+    # Look for the outermost { ... } that contains "present"
+    brace_depth = 0
+    start_idx = None
+    for i, char in enumerate(text):
+        if char == '{':
+            if brace_depth == 0:
+                start_idx = i
+            brace_depth += 1
+        elif char == '}':
+            brace_depth -= 1
+            if brace_depth == 0 and start_idx is not None:
+                candidate = text[start_idx:i+1]
+                if '"present"' in candidate:
+                    try:
+                        return json.loads(candidate)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                start_idx = None
+
+    # Strategy 4: Fix common JSON issues and retry
+    # Find anything that looks like JSON and try to fix it
+    json_like = re.search(r'\{[^{}]*"present"[^{}]*\}', text, re.DOTALL)
+    if json_like:
+        candidate = json_like.group(0)
+        # Fix single quotes to double quotes
+        candidate = candidate.replace("'", '"')
+        # Fix trailing commas before ]
+        candidate = re.sub(r',\s*]', ']', candidate)
+        # Fix trailing commas before }
+        candidate = re.sub(r',\s*}', '}', candidate)
+        try:
+            return json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Strategy 5: Extract arrays directly if JSON structure is malformed
+    present_match = re.search(r'"present"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+    absent_match = re.search(r'"absent"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+
+    if present_match or absent_match:
+        def parse_array_content(content: str) -> List[str]:
+            if not content or not content.strip():
+                return []
+            # Extract quoted strings
+            items = re.findall(r'"([^"]*)"', content)
+            return items
+
+        return {
+            'present': parse_array_content(present_match.group(1)) if present_match else [],
+            'absent': parse_array_content(absent_match.group(1)) if absent_match else []
+        }
+
+    return None
 
 
 def parse_judge_response(response: Any, concepts: List[str]) -> Dict[str, Any]:
@@ -100,7 +183,9 @@ def parse_judge_response(response: Any, concepts: List[str]) -> Dict[str, Any]:
     Implements robust parsing with multiple fallback strategies:
     1. Direct JSON parsing
     2. Extract from markdown code blocks
-    3. Regex extraction of JSON-like structure
+    3. Balanced brace extraction
+    4. Fix common JSON issues
+    5. Direct array extraction as last resort
 
     Args:
         response: Raw LLM response (str or dict with 'reasoning'/'answer' keys)
@@ -122,55 +207,21 @@ def parse_judge_response(response: Any, concepts: List[str]) -> Dict[str, Any]:
     else:
         response_text = response
 
-    result = None
+    # Try to extract JSON from the answer first
+    result = _extract_json_from_text(response_text)
 
-    # Try direct JSON parsing
-    try:
-        result = json.loads(response_text.strip())
-    except (json.JSONDecodeError, AttributeError):
-        pass
+    # If parsing failed and we have reasoning, try extracting from reasoning
+    # (some models put the JSON in their reasoning output)
+    if result is None and judge_reasoning:
+        result = _extract_json_from_text(judge_reasoning)
 
-    # Try extracting from markdown code blocks
+    # Last resort: try combining answer + reasoning and searching
     if result is None:
-        match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
-        if match:
-            try:
-                result = json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-    # Try regex fallback to find JSON-like structure
-    if result is None:
-        match = re.search(r'\{[^{}]*"present"[^{}]*"absent"[^{}]*\}', response_text, re.DOTALL)
-        if match:
-            try:
-                result = json.loads(match.group(0))
-            except json.JSONDecodeError:
-                pass
-
-    # Try more permissive regex (allow nested braces)
-    if result is None:
-        match = re.search(r'\{.*?"present".*?\[.*?\].*?"absent".*?\[.*?\].*?\}', response_text, re.DOTALL)
-        if match:
-            try:
-                # Extract the matched string
-                json_str = match.group(0)
-                result = json.loads(json_str)
-            except json.JSONDecodeError:
-                pass
+        combined = f"{response_text}\n{judge_reasoning}" if judge_reasoning else response_text
+        result = _extract_json_from_text(combined)
 
     # If parsing failed, return failure response
     if result is None:
-        return {
-            'concepts_present': [],
-            'concepts_absent': concepts,
-            'raw_llm_response': response_text if response_text else '', 
-            'judge_reasoning': judge_reasoning if judge_reasoning else None, 
-            'parse_successful': False
-        }
-
-    # Validate result structure
-    if not isinstance(result, dict) or 'present' not in result or 'absent' not in result:
         return {
             'concepts_present': [],
             'concepts_absent': concepts,
@@ -179,10 +230,29 @@ def parse_judge_response(response: Any, concepts: List[str]) -> Dict[str, Any]:
             'parse_successful': False
         }
 
+    # Validate result structure - we need at least 'present' key
+    if not isinstance(result, dict) or 'present' not in result:
+        return {
+            'concepts_present': [],
+            'concepts_absent': concepts,
+            'raw_llm_response': response_text if response_text else '',
+            'judge_reasoning': judge_reasoning if judge_reasoning else None,
+            'parse_successful': False
+        }
+
+    # Handle case where 'absent' might be missing - derive it from concepts list
+    present = result.get('present', [])
+    absent = result.get('absent', [])
+
+    # If absent is empty but present has items, derive absent from concepts
+    if not absent and present:
+        present_set = set(p.lower() for p in present)
+        absent = [c for c in concepts if c.lower() not in present_set]
+
     return {
-        'concepts_present': result.get('present', []),
-        'concepts_absent': result.get('absent', []),
-        'raw_llm_response': response_text if response_text else '', 
+        'concepts_present': present,
+        'concepts_absent': absent,
+        'raw_llm_response': response_text if response_text else '',
         'judge_reasoning': judge_reasoning if judge_reasoning else None,
         'parse_successful': True
     }

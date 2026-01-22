@@ -20,8 +20,8 @@ from dataclasses import asdict
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.r1_onevision import R1OnevisionAPI
-from experiments.r1_concept_analyzer import R1ConceptAnalyzer
+from models.glm4_vision import GLM4VisionAPI
+from experiments.glm4_concept_analyzer import GLM4ConceptAnalyzer
 from interpretability.utils import compute_inner_products
 from datasets.ddi import DDIDataLoader
 
@@ -83,12 +83,12 @@ class CLIPEmbedder:
         return torch.cat(embeddings)
 
 ##
-## Generate top concepts for DDI dataset with R1-Onevision
+## Generate top concepts for DDI dataset with GLM-4.1V-9B-Thinking
 ##
 
 def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared_data=None):
     """
-    Run experiment with pre-configured dataframe for a single random seed using R1-Onevision.
+    Run experiment with pre-configured dataframe for a single random seed using GLM-4.1V.
 
     Args:
         config_dict: Experiment configuration
@@ -104,16 +104,16 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
     seed_dir = results_dir / f'seed_{random_seed}'
     seed_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading R1-Onevision model: {config_dict['model_name']}")
-    r1_model = R1OnevisionAPI(model_name=config_dict['model_name'])
+    print(f"Loading GLM-4.1V model: {config_dict['model_name']}")
+    glm4_model = GLM4VisionAPI(model_name=config_dict['model_name'])
 
     print(f"Loading CLIP embedder...")
     clip = CLIPEmbedder()
 
-    print(f"Setting up R1ConceptAnalyzer with layer hook...")
-    analyzer = R1ConceptAnalyzer(r1_model, clip)
+    print(f"Setting up GLM4ConceptAnalyzer with layer hook...")
+    analyzer = GLM4ConceptAnalyzer(glm4_model, clip)
 
-    layer_name = config_dict.get('layer_name', 'model.model.language_model.layers.27')
+    layer_name = config_dict.get('layer_name', 'model.language_model.layers.39')
     analyzer.setup_layer_hook(layer_name)
     print(f"  Hooked layer: {layer_name}")
 
@@ -127,7 +127,7 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
         base_dir=config_dict['ddi_base_dir'],
         test_size=config_dict.get('test_size', 0.5),
         demo_size=config_dict.get('demo_size', 0.02),
-        random_state=random_seed, 
+        random_state=random_seed,
         filter_skin_tone=config_dict.get('filter_skin_tone'),
     )
 
@@ -136,8 +136,8 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
     train_paths = [os.path.join(config_dict['ddi_base_dir'], path) for path in data_loader.train_df['DDI_file']]
     train_labels = data_loader.train_df['label'].values
 
-    # Use identity preprocessor since R1 will handle image processing
-    identity_preprocess = lambda x: x 
+    # Use identity preprocessor since GLM will handle image processing
+    identity_preprocess = lambda x: x
     train_dataset, _, _, _, _ = data_loader.get_datasets(
         image_processor=identity_preprocess,
         use_demos=False
@@ -170,13 +170,13 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
 
     for idx, image_path in enumerate(tqdm(train_paths, desc="Processing images")):
         try:
-            result = r1_model(
+            result = glm4_model(
                 prompt=config_dict['prompt']['query_template'],
                 image_paths=[image_path],
                 max_new_tokens=2048,
                 return_reasoning=True,
                 system_prompt=config_dict['prompt']['system_prompt'],
-                temperature=0.1, 
+                temperature=0.1,
                 do_sample=False
             )
 
@@ -188,14 +188,14 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
 
             if config_dict['task_definition'] == 'contrastive':
                 choices = ['malignant', 'benign']
-                logprobs = r1_model.get_choice_logprobs(
+                logprobs = glm4_model.get_choice_logprobs(
                     prompt=config_dict['prompt']['query_template'],
                     choices=[' ' + c for c in choices],
                     image_paths=[image_path]
                 )
                 choice_diff = logprobs[' malignant'] - logprobs[' benign']
             elif config_dict['task_definition'] == 'malignant_prob':
-                logprobs = r1_model.get_choice_logprobs(
+                logprobs = glm4_model.get_choice_logprobs(
                     prompt=config_dict['prompt']['query_template'],
                     choices=[' malignant'],
                     image_paths=[image_path]
@@ -206,7 +206,7 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
 
         except Exception as e:
             print(f"Error processing image {idx}: {e}")
-            choice_differences.append(0.0) 
+            choice_differences.append(0.0)
             reasoning_traces.append("")
 
     choice_differences = np.array(choice_differences)
@@ -302,10 +302,10 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
 def main():
 
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Run VCR experiment with DDI dataset using R1-Onevision')
-    parser.add_argument('--model', type=str, default='R1-Onevision-7B',
-                       choices=['R1-Onevision-7B'],
-                       help='R1-Onevision model to use')
+    parser = argparse.ArgumentParser(description='Run VCR experiment with DDI dataset using GLM-4.1V')
+    parser.add_argument('--model', type=str, default='GLM-4.1V-9B-Thinking',
+                       choices=['GLM-4.1V-9B-Thinking'],
+                       help='GLM-4.1V model to use')
     parser.add_argument('--filter_skin_tone', type=str, default='All',
                        help='Filter by skin tone: All, 12, or 56')
     parser.add_argument('--random_seeds', type=int, nargs='+', default=list(range(5)),
@@ -314,7 +314,7 @@ def main():
                        choices=['malignant_prob', 'contrastive'])
     parser.add_argument('--top_k_concepts', type=int, default=20,
                        help='Number of top concepts to analyze')
-    parser.add_argument('--layer', type=str, default='model.language_model.layers.27',
+    parser.add_argument('--layer', type=str, default='model.language_model.layers.39',
                        help='Layer to hook for VCR analysis (default: last language layer)')
     args = parser.parse_args()
 
@@ -442,7 +442,7 @@ def main():
         print(f"Query template: {prompt_config.query_template[:80]}...")
 
         # Create results directory for this prompt variant
-        results_dir = Path(f'{args.model}_DDI_R1{skin_tone_suffix}_{args.task_definition}_{prompt_name}')
+        results_dir = Path(f'{args.model}_DDI_GLM4{skin_tone_suffix}_{args.task_definition}_{prompt_name}')
         results_dir.mkdir(parents=True, exist_ok=True)
 
         # Create experiment config for this prompt
@@ -543,7 +543,7 @@ def main():
         }
 
     # Save cross-prompt comparison summary
-    summary_path = Path(f'{args.model}_DDI_R1{skin_tone_suffix}_{args.task_definition}_prompt_ablation_summary.json')
+    summary_path = Path(f'{args.model}_DDI_GLM4{skin_tone_suffix}_{args.task_definition}_prompt_ablation_summary.json')
     with open(summary_path, 'w') as f:
         json.dump(all_prompt_results, f, indent=2)
 

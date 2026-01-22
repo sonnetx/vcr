@@ -2,7 +2,6 @@ import torch
 
 # Compatibility patch for torch.compiler.is_compiling
 # CRITICAL: This MUST be applied before transformers import
-# The Qwen model code calls torch.compiler.is_compiling() during model loading
 if not hasattr(torch.compiler, 'is_compiling'):
     torch.compiler.is_compiling = lambda: False
 
@@ -14,23 +13,26 @@ from typing import List, Dict, Union, Optional, Tuple
 import os
 import re
 
-class R1OnevisionAPI:
+
+class GLM4VisionAPI:
     def __init__(
         self,
-        model_name='R1-Onevision-7B',
+        model_name='GLM-4.1V-9B-Thinking',
         hf_token=None,
+        use_flash_attention=False,
     ):
         """
         Args:
             model_name: Model variant to use. Options:
-                - 'R1-Onevision-7B': 7B reasoning model (default)
+                - 'GLM-4.1V-9B-Thinking': 9B thinking/reasoning model (default)
             hf_token: Hugging Face authentication token (optional)
                      Get yours at https://huggingface.co/settings/tokens
                      Or use: huggingface-cli login
+            use_flash_attention: Whether to use flash attention 2 for better memory efficiency
         """
 
         valid_models = {
-            'R1-Onevision-7B'
+            'GLM-4.1V-9B-Thinking'
         }
         assert model_name in valid_models, f"Error: Model '{model_name}' is not implemented. Valid models are: {', '.join(valid_models)}"
 
@@ -40,7 +42,7 @@ class R1OnevisionAPI:
 
         # Model ID mapping
         model_id_map = {
-            'R1-Onevision-7B': 'Fancy-MLLM/R1-Onevision-7B',
+            'GLM-4.1V-9B-Thinking': 'zai-org/GLM-4.1V-9B-Thinking',
         }
 
         self.model_id = model_id_map[model_name]
@@ -49,57 +51,51 @@ class R1OnevisionAPI:
         if self.hf_token is None:
             self.hf_token = os.environ.get('HUGGING_FACE_HUB_TOKEN') or os.environ.get('HF_TOKEN')
 
-        print(f"Loading R1-Onevision model: {self.model_id}")
+        print(f"Loading GLM-4.1V model: {self.model_id}")
         print("This may take a while for the first download...")
 
-        # Load model using Qwen2_5_VLForConditionalGeneration
-        # (R1-Onevision is based on Qwen2.5-VL)
-        print("Loading model with Qwen2_5_VLForConditionalGeneration...")
-        from transformers import Qwen2_5_VLForConditionalGeneration
+        # Load model using Glm4vForConditionalGeneration
+        print("Loading model with Glm4vForConditionalGeneration...")
+        from transformers import Glm4vForConditionalGeneration
 
         try:
-            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            load_kwargs = {
+                'torch_dtype': torch.bfloat16,
+                'device_map': "auto",
+                'trust_remote_code': True,
+                'token': self.hf_token,
+            }
+
+            if use_flash_attention:
+                load_kwargs['attn_implementation'] = "flash_attention_2"
+                print("Using flash attention 2...")
+
+            self.model = Glm4vForConditionalGeneration.from_pretrained(
                 self.model_id,
-                dtype=torch.bfloat16,
-                device_map="auto",
-                trust_remote_code=True,
-                token=self.hf_token,
+                **load_kwargs
             )
             # Enable gradient checkpointing to reduce memory during backward pass
             if hasattr(self.model, 'gradient_checkpointing_enable'):
                 self.model.gradient_checkpointing_enable()
-                print("✓ Gradient checkpointing enabled")
-            print("✓ Model loaded successfully")
+                print("Gradient checkpointing enabled")
+            print("Model loaded successfully")
         except Exception as model_error:
             print(f"Error loading model: {model_error}")
             raise
 
         print("\nLoading processor...")
-        # R1-Onevision is based on Qwen2.5-VL, so we need to use a compatible processor
-        # The model's own processor config may not be recognized by newer transformers versions
-        try:
-            self.processor = AutoProcessor.from_pretrained(
-                self.model_id,
-                trust_remote_code=True,
-                token=self.hf_token,
-            )
-        except ValueError as e:
-            if "Unrecognized image processor" in str(e):
-                print("  Model processor not recognized, falling back to Qwen2.5-VL processor...")
-                # Use the base Qwen2.5-VL processor which is compatible
-                self.processor = AutoProcessor.from_pretrained(
-                    "Qwen/Qwen2.5-VL-7B-Instruct",
-                    trust_remote_code=True,
-                    token=self.hf_token,
-                )
-            else:
-                raise
-        print("✓ Processor loaded successfully")
+        self.processor = AutoProcessor.from_pretrained(
+            self.model_id,
+            trust_remote_code=True,
+            token=self.hf_token,
+            use_fast=True,
+        )
+        print("Processor loaded successfully")
 
-        # Get tokenizer
+        # Get tokenizer from processor
         self.tokenizer = self.processor.tokenizer
 
-        print("\n✓ Successfully loaded R1-Onevision model and processor!")
+        print("\nSuccessfully loaded GLM-4.1V model and processor!")
 
         # Configure tokenizer
         if hasattr(self.tokenizer, 'padding_side'):
@@ -110,16 +106,16 @@ class R1OnevisionAPI:
 
         self.model = self.accelerator.prepare(self.model)
         self.model.eval()
-        print(f"Model loaded successfully!")
+        print(f"Model ready on device!")
 
-    def load_and_resize_image(self, path: Union[str, Image.Image], max_size: int = 518) -> Image.Image:
+    def load_and_resize_image(self, path: Union[str, Image.Image], max_pixels: int = 16777216) -> Image.Image:
         """Load and resize image while maintaining aspect ratio
-        Note: R1-Onevision uses 518x518 images by default"""
+        Note: GLM-4.1V supports up to 4K resolution (~16M pixels for 4096x4096)"""
         try:
             if isinstance(path, str):
                 if path.startswith('http://') or path.startswith('https://'):
                     # Load from URL
-                    img = Image.open(requests.get(path, headers={"User-Agent": "R1OnevisionAPI"}, stream=True).raw)
+                    img = Image.open(requests.get(path, headers={"User-Agent": "GLM4VisionAPI"}, stream=True).raw)
                 else:
                     # Load from local file
                     img = Image.open(path)
@@ -130,9 +126,11 @@ class R1OnevisionAPI:
 
             img = img.convert('RGB')
 
-            if img.size[0] > max_size or img.size[1] > max_size:
-                ratio = min(max_size/img.size[0], max_size/img.size[1])
-                new_size = (int(img.size[0]*ratio), int(img.size[1]*ratio))
+            # Resize if image exceeds max pixels
+            current_pixels = img.size[0] * img.size[1]
+            if current_pixels > max_pixels:
+                ratio = (max_pixels / current_pixels) ** 0.5
+                new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
                 img = img.resize(new_size, Image.Resampling.LANCZOS)
 
             return img
@@ -154,8 +152,9 @@ class R1OnevisionAPI:
 
     def extract_reasoning(self, text: str) -> Tuple[str, str]:
         """
-        Extract reasoning and final answer from model output.
-        R1-Onevision uses <think> and <answer> tags to separate reasoning from final answer.
+        Extract reasoning and final answer from GLM-4.1V-Thinking model output.
+
+        GLM uses <think>...</think> tags followed by <answer>...</answer> tags.
 
         Args:
             text: Raw model output
@@ -163,9 +162,9 @@ class R1OnevisionAPI:
         Returns:
             Tuple of (reasoning, final_answer)
         """
-        # Pattern 1: Look for <think> and <answer> tags (R1-Onevision format)
-        # Format: <think>reasoning here<answer>final answer here
-        think_answer_pattern = r'<think>(.*?)<answer>(.*?)(?:</answer>|$)'
+        # Pattern 1: <think>...</think> followed by <answer>...</answer> (PRIMARY for GLM-4.1V-Thinking)
+        # This is the actual format GLM uses
+        think_answer_pattern = r'<think>(.*?)</think>\s*<answer>(.*?)(?:</answer>|$)'
         think_answer_match = re.search(think_answer_pattern, text, re.DOTALL)
 
         if think_answer_match:
@@ -173,33 +172,47 @@ class R1OnevisionAPI:
             final_answer = think_answer_match.group(2).strip()
             return reasoning, final_answer
 
-        # Pattern 2: Look for <think> tag only (no <answer> tag)
-        # In this case, everything after <think> is reasoning, and we extract conclusion
+        # Pattern 2: R1-style <think>...<answer> without </think> closing tag
+        think_answer_no_close_pattern = r'<think>(.*?)<answer>(.*?)(?:</answer>|$)'
+        think_answer_no_close_match = re.search(think_answer_no_close_pattern, text, re.DOTALL)
+
+        if think_answer_no_close_match:
+            reasoning = think_answer_no_close_match.group(1).strip()
+            final_answer = think_answer_no_close_match.group(2).strip()
+            return reasoning, final_answer
+
+        # Pattern 3: Proper <think>...</think> format without <answer> tags
+        think_pattern = r'<think>(.*?)</think>\s*(.*?)$'
+        think_match = re.search(think_pattern, text, re.DOTALL)
+
+        if think_match:
+            reasoning = think_match.group(1).strip()
+            final_answer = think_match.group(2).strip()
+            # Strip any remaining <answer> tags if present
+            final_answer = re.sub(r'^<answer>\s*', '', final_answer)
+            final_answer = re.sub(r'\s*</answer>$', '', final_answer)
+            return reasoning, final_answer
+
+        # Pattern 4: <think> tag without closing (incomplete response)
         think_only_pattern = r'<think>(.*?)$'
         think_only_match = re.search(think_only_pattern, text, re.DOTALL)
 
         if think_only_match:
             reasoning = think_only_match.group(1).strip()
-            # Try to extract final answer from reasoning using conclusion markers
+            # Check if there's an <answer> tag within the content
+            answer_in_think = re.search(r'<answer>(.*?)(?:</answer>|$)', reasoning, re.DOTALL)
+            if answer_in_think:
+                # Split reasoning and answer
+                reasoning = reasoning[:reasoning.index('<answer>')].strip()
+                final_answer = answer_in_think.group(1).strip()
+                return reasoning, final_answer
+            # Try to extract conclusion from reasoning
             conclusion_pattern = r'(.*?)(?:Therefore|Thus|In conclusion|To summarize|Final answer)[,:]?\s*(.*?)$'
             conclusion_match = re.search(conclusion_pattern, reasoning, re.DOTALL | re.IGNORECASE)
             if conclusion_match and conclusion_match.group(2).strip():
-                final_answer = conclusion_match.group(2).strip()
-                reasoning = conclusion_match.group(1).strip()
-            else:
-                # No clear conclusion, return last sentence/paragraph as answer
-                final_answer = reasoning.split('.')[-1].strip() if '.' in reasoning else reasoning
-            return reasoning, final_answer
-
-        # Pattern 3: Legacy <think>...</think> tags (for backwards compatibility)
-        think_closing_pattern = r'<think>(.*?)</think>(.*?)$'
-        think_closing_match = re.search(think_closing_pattern, text, re.DOTALL)
-
-        if think_closing_match:
-            reasoning = think_closing_match.group(1).strip()
-            final_answer = think_closing_match.group(2).strip()
-            if not final_answer:
-                final_answer = text
+                return conclusion_match.group(1).strip(), conclusion_match.group(2).strip()
+            # Default: return last sentence as answer
+            final_answer = reasoning.split('.')[-1].strip() if '.' in reasoning else reasoning
             return reasoning, final_answer
 
         # Pattern 4: Look for explicit "Reasoning:" or "Analysis:" sections
@@ -215,8 +228,7 @@ class R1OnevisionAPI:
                 final_answer = match.group(2).strip() if len(match.groups()) > 1 else text
                 return reasoning, final_answer
 
-        # Pattern 5: If no explicit reasoning markers, try to split by common patterns
-        # Look for transitions like "Therefore", "Thus", "In conclusion"
+        # Pattern 5: Conclusion markers without tags
         conclusion_pattern = r'(.*?)(?:Therefore|Thus|In conclusion|To summarize|Final answer)[,:]?\s*(.*)'
         conclusion_match = re.search(conclusion_pattern, text, re.DOTALL | re.IGNORECASE)
 
@@ -238,85 +250,57 @@ class R1OnevisionAPI:
         for choice in choices:
             full_text = f"{prompt} {choice}"
 
-            messages = [
-                {
-                    "role": "user",
-                    "content": []
-                }
-            ]
-
+            # Build messages with images
+            user_content = []
             for img in images:
-                messages[0]["content"].append({
+                user_content.append({
                     "type": "image",
                     "image": img
                 })
-
-            messages[0]["content"].append({
+            user_content.append({
                 "type": "text",
                 "text": full_text
             })
 
-            try:
-                # Try using qwen_vl_utils if available
-                try:
-                    from qwen_vl_utils import process_vision_info
+            messages = [{"role": "user", "content": user_content}]
 
-                    text = self.processor.apply_chat_template(
-                        messages,
-                        tokenize=False,
-                        add_generation_prompt=True
-                    )
-                    image_inputs, video_inputs = process_vision_info(messages)
-                    inputs = self.processor(
-                        text=[text],
-                        images=image_inputs,
-                        videos=video_inputs,
-                        padding=True,
-                        return_tensors="pt"
-                    ).to(self.device)
-                except ImportError:
-                    # Fallback: Use processor directly
-                    inputs = self.processor(
-                        text=messages,
-                        images=images if images else None,
-                        return_tensors="pt",
-                        padding=True,
-                    ).to(self.device)
+            try:
+                # GLM uses apply_chat_template with tokenize=True, return_dict=True
+                inputs = self.processor.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    return_dict=True,
+                    return_tensors="pt"
+                ).to(self.model.device)
 
                 with torch.no_grad():
                     outputs = self.model(**inputs)
 
                 logits = outputs.logits[0]
 
-                prompt_only_messages = [
-                    {
-                        "role": "user",
-                        "content": []
-                    }
-                ]
+                # Get prompt-only tokens for comparison
+                prompt_content = []
                 for img in images:
-                    prompt_only_messages[0]["content"].append({
-                        "type": "image",
-                        "image": img
-                    })
-                prompt_only_messages[0]["content"].append({
-                    "type": "text",
-                    "text": prompt
-                })
+                    prompt_content.append({"type": "image", "image": img})
+                prompt_content.append({"type": "text", "text": prompt})
+                prompt_messages = [{"role": "user", "content": prompt_content}]
 
                 try:
-                    prompt_text = self.processor.apply_chat_template(
-                        prompt_only_messages,
-                        tokenize=False,
-                        add_generation_prompt=True
+                    prompt_inputs = self.processor.apply_chat_template(
+                        prompt_messages,
+                        tokenize=True,
+                        add_generation_prompt=True,
+                        return_dict=True,
+                        return_tensors="pt"
                     )
-                    prompt_tokens = self.tokenizer.encode(prompt_text, add_special_tokens=True)
+                    prompt_tokens_len = prompt_inputs["input_ids"].shape[1]
                 except:
                     prompt_tokens = self.tokenizer.encode(prompt, add_special_tokens=True)
+                    prompt_tokens_len = len(prompt_tokens)
 
                 full_tokens = inputs["input_ids"][0]
-
-                choice_start = len(prompt_tokens) - 1
+                choice_start = prompt_tokens_len - 1
 
                 choice_logprob = 0
                 for idx in range(choice_start, min(len(full_tokens) - 1, len(logits) - 1)):
@@ -344,11 +328,11 @@ class R1OnevisionAPI:
         self,
         prompt: str,
         image_paths: List[Union[str, Image.Image]] = [],
-        max_new_tokens: int = 4096,
+        max_new_tokens: int = 8192,
         num_beams: int = 1,
         min_length: int = 1,
-        temperature: float = 0.7,
-        do_sample: bool = False,
+        temperature: float = 1.0,
+        do_sample: bool = True,
         top_k: int = 50,
         top_p: float = 0.95,
         system_prompt: Optional[str] = None,
@@ -359,12 +343,12 @@ class R1OnevisionAPI:
 
         Args:
             prompt: Text prompt
-            image_paths: List of image paths or PIL Images
-            max_new_tokens: Maximum number of new tokens to generate (default 4096 for reasoning)
+            image_paths: List of image paths, URLs, or PIL Images
+            max_new_tokens: Maximum number of new tokens to generate (default 8192)
             num_beams: Number of beams for beam search
             min_length: Minimum length of generated sequence
-            temperature: Sampling temperature
-            do_sample: Whether to use sampling
+            temperature: Sampling temperature (default 1.0 for thinking models)
+            do_sample: Whether to use sampling (default True for thinking models)
             top_k: Top-k sampling parameter
             top_p: Top-p (nucleus) sampling parameter
             system_prompt: Optional system prompt
@@ -381,8 +365,10 @@ class R1OnevisionAPI:
         if not isinstance(image_paths, list):
             image_paths = [image_paths] if image_paths else []
 
+        # Load and preprocess images
         images = self.preprocess_images(image_paths) if image_paths else []
 
+        # Build messages
         messages = []
 
         if system_prompt:
@@ -391,6 +377,7 @@ class R1OnevisionAPI:
                 "content": [{"type": "text", "text": system_prompt}]
             })
 
+        # Build user content with images and text
         user_content = []
         for img in images:
             user_content.append({
@@ -408,37 +395,20 @@ class R1OnevisionAPI:
         })
 
         try:
-            # Try using qwen_vl_utils if available
-            try:
-                from qwen_vl_utils import process_vision_info
-
-                text = self.processor.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True
-                )
-                image_inputs, video_inputs = process_vision_info(messages)
-                inputs = self.processor(
-                    text=[text],
-                    images=image_inputs,
-                    videos=video_inputs,
-                    padding=True,
-                    return_tensors="pt"
-                ).to(self.device)
-            except ImportError:
-                print("Warning: qwen_vl_utils not found, using fallback processing")
-                inputs = self.processor(
-                    text=messages,
-                    images=images if images else None,
-                    return_tensors="pt",
-                    padding=True,
-                ).to(self.device)
+            # GLM uses apply_chat_template with tokenize=True, return_dict=True
+            inputs = self.processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt"
+            ).to(self.model.device)
         except Exception as e:
             print(f"Error during input processing: {e}")
             raise
 
         with torch.no_grad():
-            generated = self.model.generate(
+            generated_ids = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 num_beams=num_beams,
@@ -451,9 +421,15 @@ class R1OnevisionAPI:
                 eos_token_id=self.tokenizer.eos_token_id,
             )
 
+        # Decode output - use processor.decode and skip_special_tokens=False to preserve <think> tags
         input_length = inputs["input_ids"].shape[1]
-        new_tokens = generated[0][input_length:]
-        full_output = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        output_text = self.processor.decode(
+            generated_ids[0][input_length:],
+            skip_special_tokens=False
+        )
+
+        # Clean up end tokens but preserve think tags
+        full_output = output_text.replace('<|endoftext|>', '').replace('<|user|>', '').replace('<|assistant|>', '').strip()
 
         if return_reasoning:
             reasoning, answer = self.extract_reasoning(full_output)
