@@ -299,8 +299,8 @@ class GLM4ConceptAnalyzer:
 
                 user_content = []
                 for img_path in image_paths:
-                    # Load image for GLM
-                    img = self.model.load_and_resize_image(img_path)
+                    # Load image for GLM with reduced resolution
+                    img = self.model.load_and_resize_image(img_path, max_pixels=1048576)  # 1024x1024
                     user_content.append({"type": "image", "image": img})
 
                 user_content.append({"type": "text", "text": query_template})
@@ -315,7 +315,14 @@ class GLM4ConceptAnalyzer:
                     return_tensors="pt"
                 ).to(base_model.device)
 
+                # Clean up before forward pass
+                del messages, user_content, img
+
                 _ = base_model(**inputs)
+
+                # Clean up after forward pass
+                del inputs
+                torch.cuda.empty_cache()
 
         hook_handle.remove()
 
@@ -673,11 +680,14 @@ class GLM4ConceptAnalyzer:
                 "content": [{"type": "text", "text": system_prompt}]
             })
 
-        # Load and process image
+        # Load and process image with reduced resolution for gradient computation
+        # Use 1M pixels instead of 16M to save memory during gradient computation
         if isinstance(image, str):
-            img = self.model.load_and_resize_image(image)
+            img = self.model.load_and_resize_image(image, max_pixels=1048576)  # 1024x1024
+            loaded_image = True
         else:
             img = image
+            loaded_image = False
 
         user_content = [
             {"type": "image", "image": img},
@@ -697,6 +707,11 @@ class GLM4ConceptAnalyzer:
             return_dict=True,
             return_tensors="pt"
         ).to(base_model.device)
+
+        # Clean up image and messages after tokenization
+        if loaded_image:
+            del img
+        del messages, user_content
 
         # Enable gradients for backprop (even in eval mode)
         with torch.set_grad_enabled(True):
