@@ -599,6 +599,10 @@ class KimiVLConceptAnalyzer:
             elif task_score == 'malignant_prob':
                 # === Single completion: compute gradient for target only ===
 
+                # Aggressive pre-cleanup for MoE memory usage
+                torch.cuda.empty_cache()
+                gc.collect()
+
                 layer_outputs = []
                 def hook_fn(module, input, output):
                     layer_outputs.append(output)
@@ -636,6 +640,8 @@ class KimiVLConceptAnalyzer:
                     print(f"WARNING: grad is None - activation not in computation graph!")
                     hook.remove()
                     del layer_outputs[:]
+                    torch.cuda.empty_cache()
+                    gc.collect()
                     continue
 
                 # Debug: print first sample's gradient stats
@@ -648,35 +654,42 @@ class KimiVLConceptAnalyzer:
                     print(f"  grad abs mean: {grad.abs().mean().item():.8f}")
 
                 hook.remove()
-                del log_prob
 
-                flattened_grad = grad.view(grad.size(1), -1)
+                # Copy gradient to CPU immediately to free GPU memory
+                flattened_grad = grad.view(grad.size(1), -1).detach().clone()
 
-                del activation, layer_outputs[:]
+                # Aggressive cleanup - delete everything before computing sensitivities
+                del log_prob, grad, activation
+                layer_outputs.clear()
+                torch.cuda.synchronize()
                 torch.cuda.empty_cache()
                 gc.collect()
 
             # Compute directional derivatives: gradient · concept_vector
-            raw_sensitivities = torch.matmul(flattened_grad, concept_vectors.T)
+            # Move flattened_grad to GPU only for matmul, then immediately delete
+            if not flattened_grad.is_cuda:
+                flattened_grad_gpu = flattened_grad.to(device=concept_vectors.device, dtype=concept_vectors.dtype)
+            else:
+                flattened_grad_gpu = flattened_grad
+
+            raw_sensitivities = torch.matmul(flattened_grad_gpu, concept_vectors.T)
             weighted_sensitivities = raw_sensitivities * concept_weights.unsqueeze(0)
 
-            # Extract sensitivities from second-to-last position
-            raw_at_pred_pos = raw_sensitivities[-2, :].cpu().detach()
+            # Extract sensitivities from second-to-last position and move to CPU immediately
+            raw_at_pred_pos = raw_sensitivities[-2, :].detach().cpu()
             if raw_at_pred_pos.dtype == torch.bfloat16:
                 raw_at_pred_pos = raw_at_pred_pos.float()
             all_raw_sensitivities.append(raw_at_pred_pos.numpy())
 
-            weighted_at_pred_pos = weighted_sensitivities[-2, :].cpu().detach()
+            weighted_at_pred_pos = weighted_sensitivities[-2, :].detach().cpu()
             if weighted_at_pred_pos.dtype == torch.bfloat16:
                 weighted_at_pred_pos = weighted_at_pred_pos.float()
             all_weighted_sensitivities.append(weighted_at_pred_pos.numpy())
 
             # Aggressive memory cleanup
-            if 'grad' in locals():
-                del grad
-            if 'flattened_grad' in locals():
-                del flattened_grad
-            del raw_sensitivities, weighted_sensitivities
+            del flattened_grad, flattened_grad_gpu, raw_sensitivities, weighted_sensitivities
+            del raw_at_pred_pos, weighted_at_pred_pos
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
             gc.collect()
 
@@ -709,10 +722,11 @@ class KimiVLConceptAnalyzer:
                 "content": system_prompt
             })
 
-        # Load and process image with reduced resolution for gradient computation
-        # Use 1M pixels instead of 3.2M to save memory during gradient computation
+        # Load and process image with heavily reduced resolution for gradient computation
+        # Kimi-VL MoE architecture uses a lot of memory during backprop
+        # Use 262144 pixels (512x512) to fit in memory during gradient computation
         if isinstance(image, str):
-            img = self.model.load_and_resize_image(image, max_pixels=1048576)  # 1024x1024
+            img = self.model.load_and_resize_image(image, max_pixels=262144)  # 512x512
             loaded_image = True
         else:
             img = image

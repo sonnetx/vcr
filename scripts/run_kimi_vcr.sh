@@ -29,6 +29,9 @@ export HF_HOME=/scratch/users/$USER/huggingface
 export HF_DATASETS_CACHE=/scratch/users/$USER/huggingface/datasets
 export TORCH_HOME=/scratch/users/$USER/torch
 
+# Memory management for MoE models - helps avoid fragmentation OOM
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # Create directories
 mkdir -p $TMPDIR $HF_HOME $HF_DATASETS_CACHE $TORCH_HOME
 mkdir -p logs
