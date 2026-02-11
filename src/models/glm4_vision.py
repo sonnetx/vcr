@@ -108,9 +108,10 @@ class GLM4VisionAPI:
         self.model.eval()
         print(f"Model ready on device!")
 
-    def load_and_resize_image(self, path: Union[str, Image.Image], max_pixels: int = 16777216) -> Image.Image:
+    def load_and_resize_image(self, path: Union[str, Image.Image], max_pixels: int = 1048576) -> Image.Image:
         """Load and resize image while maintaining aspect ratio
-        Note: GLM-4.1V supports up to 4K resolution (~16M pixels for 4096x4096)"""
+        Note: GLM-4.1V supports up to 4K resolution (~16M pixels for 4096x4096)
+        Default reduced to 1M pixels to prevent OOM on smaller GPUs."""
         try:
             if isinstance(path, str):
                 if path.startswith('http://') or path.startswith('https://'):

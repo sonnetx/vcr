@@ -288,7 +288,9 @@ class GLM4ConceptAnalyzer:
         for batch in tqdm(dataloader, desc="Collecting activations"):
             image_paths = batch['image_path']
 
-            with torch.no_grad():
+            with torch.no_grad(), torch.cuda.amp.autocast():
+                # Clear cache before each batch to prevent OOM
+                torch.cuda.empty_cache()
                 # Build messages for GLM
                 messages = []
                 if system_prompt:

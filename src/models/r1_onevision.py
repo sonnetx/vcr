@@ -408,7 +408,7 @@ class R1OnevisionAPI:
         })
 
         try:
-            # Try using qwen_vl_utils if available
+            # Try using qwen_vl_utils if available (handles image extraction from messages)
             try:
                 from qwen_vl_utils import process_vision_info
 
@@ -426,9 +426,15 @@ class R1OnevisionAPI:
                     return_tensors="pt"
                 ).to(self.device)
             except ImportError:
-                print("Warning: qwen_vl_utils not found, using fallback processing")
+                # Fallback: manually apply chat template and pass images directly
+                # This works for image-only use cases without qwen_vl_utils
+                text = self.processor.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
                 inputs = self.processor(
-                    text=messages,
+                    text=[text],
                     images=images if images else None,
                     return_tensors="pt",
                     padding=True,

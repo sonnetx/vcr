@@ -30,6 +30,7 @@ from experiments.experiment_utils import (
     ExperimentConfig,
     extract_concepts_from_reasoning,
     analyze_reasoning_concept_overlap,
+    compute_cross_seed_consistency,
     load_experiment_data
 )
 
@@ -163,12 +164,31 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
     np.save(seed_dir / 'image_emb.npy', image_emb)
     np.save(seed_dir / 'text_emb.npy', text_emb)
 
+    # Save image paths to ensure correct index alignment during visualization
+    # This prevents index mismatch bugs when regenerating train/test splits
+    with open(seed_dir / 'image_paths.json', 'w') as f:
+        json.dump(train_paths, f)
+
     print(f"Computing training set predictions and reasoning traces for seed {random_seed}...")
 
+    # Resume support: check for partial checkpoint
+    checkpoint_path = seed_dir / 'checkpoint_predictions.npz'
+    checkpoint_reasoning_path = seed_dir / 'checkpoint_reasoning.json'
+    start_idx = 0
     choice_differences = []
     reasoning_traces = []
 
-    for idx, image_path in enumerate(tqdm(train_paths, desc="Processing images")):
+    if checkpoint_path.exists() and checkpoint_reasoning_path.exists():
+        ckpt = np.load(checkpoint_path)
+        choice_differences = ckpt['choice_differences'].tolist()
+        with open(checkpoint_reasoning_path, 'r') as f:
+            reasoning_traces = json.load(f)
+        start_idx = len(choice_differences)
+        print(f"Resuming from checkpoint at image {start_idx}/{len(train_paths)}")
+
+    for idx, image_path in enumerate(tqdm(train_paths, desc="Processing images", initial=start_idx, total=len(train_paths))):
+        if idx < start_idx:
+            continue
         try:
             result = r1_model(
                 prompt=config_dict['prompt']['query_template'],
@@ -206,8 +226,14 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
 
         except Exception as e:
             print(f"Error processing image {idx}: {e}")
-            choice_differences.append(0.0) 
+            choice_differences.append(0.0)
             reasoning_traces.append("")
+
+        # Save checkpoint every 10 images
+        if (idx + 1) % 10 == 0:
+            np.savez(checkpoint_path, choice_differences=np.array(choice_differences))
+            with open(checkpoint_reasoning_path, 'w') as f:
+                json.dump(reasoning_traces, f)
 
     choice_differences = np.array(choice_differences)
     np.save(seed_dir / 'choice_differences.npy', choice_differences)
@@ -215,6 +241,12 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
     # Save reasoning traces
     with open(seed_dir / 'reasoning_traces.json', 'w') as f:
         json.dump(reasoning_traces, f)
+
+    # Clean up checkpoint files after successful completion
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
+    if checkpoint_reasoning_path.exists():
+        checkpoint_reasoning_path.unlink()
 
     # === VCR PIPELINE: Collect activations and train concept model ===
     print("Collecting activations from hooked layer...")
@@ -316,6 +348,8 @@ def main():
                        help='Number of top concepts to analyze')
     parser.add_argument('--layer', type=str, default='model.language_model.layers.27',
                        help='Layer to hook for VCR analysis (default: last language layer)')
+    parser.add_argument('--resume', type=bool, default=True,
+                       help='Resume from saved results if available (default: True)')
     args = parser.parse_args()
 
     # ===== EXPERIMENT CONFIGURATION =====
@@ -325,64 +359,64 @@ def main():
 
     # Prompt ablation configurations
     PROMPT_ABLATIONS = {
+        # "detailed_medical": PromptConfig(
+        #     system_prompt="You are a medical image analysis assistant specializing in dermatology. Analyze skin lesion images carefully.",
+        #     query_template="Analyze this skin lesion image. Consider features like color, texture, borders, and symmetry. Determine if the lesion is benign or malignant.",
+        #     use_demos=False
+        # ),
         "detailed_medical": PromptConfig(
-            system_prompt="You are a medical image analysis assistant specializing in dermatology. Analyze skin lesion images carefully.",
-            query_template="Analyze this skin lesion image. Consider features like color, texture, borders, and symmetry. Determine if the lesion is benign or malignant.",
+            system_prompt="You are a medical image analysis assistant. For each skin lesion image, choose between Benign and Malignant.",
+            query_template="Analyze this skin lesion image. Determine if the lesion is benign or malignant.",
             use_demos=False
         ),
-        "simple_binary": PromptConfig(
-            system_prompt="You are a dermatology expert.",
-            query_template="Is this skin lesion benign or malignant?",
-            use_demos=False
-        ),
-        "structured_abcde": PromptConfig(
-            system_prompt="You are a board-certified dermatologist analyzing dermoscopy images.",
-            query_template="Examine this lesion using the ABCDE criteria (Asymmetry, Border, Color, Diameter, Evolution). Conclude with your diagnosis: benign or malignant.",
-            use_demos=False
-        ),
-        "cot_reasoning": PromptConfig(
-            system_prompt="You are a medical image analysis expert. Think step by step.",
-            query_template="Look at this skin lesion image. First describe what you observe, then reason about whether it appears benign or malignant, and finally state your conclusion.",
-            use_demos=False
-        ),
-        # Evaluation/monitoring framing
-        "evaluated": PromptConfig(
-            system_prompt="You are a dermatology AI being evaluated for clinical accuracy. Your responses will be reviewed by expert dermatologists.",
-            query_template="Analyze this skin lesion image and determine if it is benign or malignant. Provide your reasoning.",
-            use_demos=False
-        ),
-        "careful_accuracy": PromptConfig(
-            system_prompt="You are a medical image analysis assistant. Accuracy is critical - take your time and think carefully before responding.",
-            query_template="Carefully examine this skin lesion image. Think through your analysis thoroughly before concluding whether it is benign or malignant.",
-            use_demos=False
-        ),
-        "high_stakes": PromptConfig(
-            system_prompt="You are assisting with a dermatology consultation. Your analysis will inform patient care decisions.",
-            query_template="A patient has presented with this skin lesion. Analyze the image and determine if this lesion appears benign or malignant.",
-            use_demos=False
-        ),
-        # Confidence/uncertainty framing
-        "express_uncertainty": PromptConfig(
-            system_prompt="You are a dermatology expert. When uncertain, express your uncertainty clearly.",
-            query_template="Analyze this skin lesion image. Determine if it is benign or malignant, and indicate how confident you are in your assessment.",
-            use_demos=False
-        ),
-        "differential_diagnosis": PromptConfig(
-            system_prompt="You are a dermatologist considering differential diagnoses.",
-            query_template="Examine this skin lesion. Consider what conditions it could represent, then provide your assessment of whether it is benign or malignant.",
-            use_demos=False
-        ),
-        # Minimal/neutral framing
-        "minimal": PromptConfig(
-            system_prompt="You analyze medical images.",
-            query_template="Classify this skin lesion as benign or malignant.",
-            use_demos=False
-        ),
-        "no_system": PromptConfig(
-            system_prompt="",
-            query_template="Look at this image of a skin lesion. Is it benign or malignant? Explain your reasoning.",
-            use_demos=False
-        ),
+        # "structured_abcde": PromptConfig(
+        #     system_prompt="You are a board-certified dermatologist analyzing dermoscopy images.",
+        #     query_template="Examine this lesion using the ABCDE criteria (Asymmetry, Border, Color, Diameter, Evolution). Conclude with your diagnosis: benign or malignant.",
+        #     use_demos=False
+        # ),
+        # "cot_reasoning": PromptConfig(
+        #     system_prompt="You are a medical image analysis expert. Think step by step.",
+        #     query_template="Look at this skin lesion image. First describe what you observe, then reason about whether it appears benign or malignant, and finally state your conclusion.",
+        #     use_demos=False
+        # ),
+        # # Evaluation/monitoring framing
+        # "evaluated": PromptConfig(
+        #     system_prompt="You are a dermatology AI being evaluated for clinical accuracy. Your responses will be reviewed by expert dermatologists.",
+        #     query_template="Analyze this skin lesion image and determine if it is benign or malignant. Provide your reasoning.",
+        #     use_demos=False
+        # ),
+        # "careful_accuracy": PromptConfig(
+        #     system_prompt="You are a medical image analysis assistant. Accuracy is critical - take your time and think carefully before responding.",
+        #     query_template="Carefully examine this skin lesion image. Think through your analysis thoroughly before concluding whether it is benign or malignant.",
+        #     use_demos=False
+        # ),
+        # "high_stakes": PromptConfig(
+        #     system_prompt="You are assisting with a dermatology consultation. Your analysis will inform patient care decisions.",
+        #     query_template="A patient has presented with this skin lesion. Analyze the image and determine if this lesion appears benign or malignant.",
+        #     use_demos=False
+        # ),
+        # # Confidence/uncertainty framing
+        # "express_uncertainty": PromptConfig(
+        #     system_prompt="You are a dermatology expert. When uncertain, express your uncertainty clearly.",
+        #     query_template="Analyze this skin lesion image. Determine if it is benign or malignant, and indicate how confident you are in your assessment.",
+        #     use_demos=False
+        # ),
+        # "differential_diagnosis": PromptConfig(
+        #     system_prompt="You are a dermatologist considering differential diagnoses.",
+        #     query_template="Examine this skin lesion. Consider what conditions it could represent, then provide your assessment of whether it is benign or malignant.",
+        #     use_demos=False
+        # ),
+        # # Minimal/neutral framing
+        # "minimal": PromptConfig(
+        #     system_prompt="You analyze medical images.",
+        #     query_template="Classify this skin lesion as benign or malignant.",
+        #     use_demos=False
+        # ),
+        # "no_system": PromptConfig(
+        #     system_prompt="",
+        #     query_template="Look at this image of a skin lesion. Is it benign or malignant? Explain your reasoning.",
+        #     use_demos=False
+        # ),
     }
 
     # Data preprocessing function
@@ -470,6 +504,32 @@ def main():
         concept_texts = None
 
         for i, seed in enumerate(random_seeds):
+            seed_dir = results_dir / f'seed_{seed}'
+
+            # Check if we can resume from saved results
+            if args.resume and seed_dir.exists():
+                sens_path = seed_dir / 'weighted_sens.npy'
+                analysis_path = seed_dir / 'reasoning_analysis.json'
+                concepts_path = seed_dir / 'concept_texts.json'
+
+                if sens_path.exists() and analysis_path.exists() and concepts_path.exists():
+                    print(f"\n{'='*60}")
+                    print(f"[{prompt_name}] Loading cached results for seed {seed} ({i+1}/{len(random_seeds)})")
+                    print(f"{'='*60}")
+
+                    # Load saved results
+                    sensitivities = np.load(sens_path)
+                    with open(analysis_path, 'r') as f:
+                        reasoning_analysis = json.load(f)
+                    if concept_texts is None:
+                        with open(concepts_path, 'r') as f:
+                            concept_texts = json.load(f)
+
+                    all_sensitivities.append(sensitivities)
+                    all_reasoning_analyses.append(reasoning_analysis)
+                    print(f"Loaded cached results for seed: {seed}")
+                    continue
+
             print(f"\n{'='*60}")
             print(f"[{prompt_name}] Running experiment {i+1}/{len(random_seeds)} with random seed: {seed}")
             print(f"Model: {args.model}")
@@ -494,12 +554,19 @@ def main():
         print(f"{'='*60}")
 
         # Average sensitivity scores
-        avg_sensitivities = np.mean(all_sensitivities, axis=0)
-        std_sensitivities = np.std(all_sensitivities, axis=0)
+        # Each element in all_sensitivities is [num_samples, num_concepts]
+        # First average across samples to get [num_concepts] per seed, then across seeds
+        sample_averaged = [np.mean(sens, axis=0) for sens in all_sensitivities]
+        avg_sensitivities = np.mean(sample_averaged, axis=0)
+        std_sensitivities = np.std(sample_averaged, axis=0)
 
-        # Save aggregated results
-        np.save(results_dir / 'avg_sensitivities.npy', avg_sensitivities)
-        np.save(results_dir / 'std_sensitivities.npy', std_sensitivities)
+        # Save aggregated results in a seed-specific subdirectory to avoid overwrites
+        seed_label = '_'.join(str(s) for s in random_seeds)
+        agg_dir = results_dir / f'aggregated_seeds_{seed_label}'
+        agg_dir.mkdir(parents=True, exist_ok=True)
+
+        np.save(agg_dir / 'avg_sensitivities.npy', avg_sensitivities)
+        np.save(agg_dir / 'std_sensitivities.npy', std_sensitivities)
 
         # Get overall top concepts
         top_k = args.top_k_concepts
@@ -515,6 +582,10 @@ def main():
         for ra in all_reasoning_analyses:
             all_reasoning_concepts.update(ra['reasoning_concept_counts'])
 
+        # Cross-seed consistency of top VCR sensitivity concepts
+        per_seed_top_concepts = [ra['top_concepts'] for ra in all_reasoning_analyses]
+        consistency = compute_cross_seed_consistency(per_seed_top_concepts, top_k)
+
         aggregated_analysis = {
             'prompt_name': prompt_name,
             'top_concepts_overall': top_concepts_overall,
@@ -524,9 +595,10 @@ def main():
             'std_overlap_percentage': np.std(overlap_percentages),
             'most_common_reasoning_concepts': [c for c, _ in all_reasoning_concepts.most_common(50)],
             'reasoning_concept_frequencies': dict(all_reasoning_concepts.most_common(100)),
+            'cross_seed_consistency': consistency,
         }
 
-        with open(results_dir / 'aggregated_reasoning_analysis.json', 'w') as f:
+        with open(agg_dir / 'aggregated_reasoning_analysis.json', 'w') as f:
             json.dump(aggregated_analysis, f, indent=2)
 
         print(f"\n[{prompt_name}] Aggregated Reasoning Analysis:")

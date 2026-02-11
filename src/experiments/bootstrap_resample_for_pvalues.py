@@ -169,15 +169,31 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
     np.save(seed_dir / 'image_emb.npy', image_emb)
     np.save(seed_dir / 'text_emb.npy', text_emb)
 
-    
+    # Save image paths to ensure correct index alignment during visualization
+    # This prevents index mismatch bugs when regenerating train/test splits
+    with open(seed_dir / 'image_paths.json', 'w') as f:
+        json.dump(train_paths, f)
+
     # Compute choice differences for this seed
     print(f"Computing training set choice differences for seed {random_seed}...")
+
+    # Resume support: check for partial checkpoint
+    checkpoint_path = seed_dir / 'checkpoint_predictions.npz'
+    start_idx = 0
     choice_differences = []
-    
+
+    if checkpoint_path.exists():
+        ckpt = np.load(checkpoint_path)
+        choice_differences = ckpt['choice_differences'].tolist()
+        start_idx = len(choice_differences)
+        print(f"Resuming from checkpoint at batch {start_idx}/{len(train_dataset)}")
+
     dataloader = DataLoader(train_dataset, batch_size=1, shuffle=False)
     analyzer.model.model.eval()
-    
-    for batch in tqdm(dataloader, desc="Computing choice differences"):
+
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc="Computing choice differences", initial=start_idx, total=len(dataloader))):
+        if batch_idx < start_idx:
+            continue
         image_batch = batch['image'].cuda()
         if len(image_batch.shape) == 4:
             image_batch = image_batch.unsqueeze(1).unsqueeze(2)
@@ -213,9 +229,17 @@ def run_single_seed_experiment(config_dict, df_preprocessed, random_seed, shared
                 ).item()
             
             choice_differences.append(choice_diff)
-    
+
+        # Save checkpoint every 10 batches
+        if (batch_idx + 1) % 10 == 0:
+            np.savez(checkpoint_path, choice_differences=np.array(choice_differences))
+
     choice_differences = np.array(choice_differences)
     np.save(seed_dir / 'choice_differences.npy', choice_differences)
+
+    # Clean up checkpoint file after successful completion
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
     
     # Collect activations
     print("Collecting activations...")

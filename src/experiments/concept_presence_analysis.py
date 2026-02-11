@@ -23,9 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 from tqdm import tqdm
-import torch
 
-from models.r1_onevision import R1OnevisionAPI
+from models.claude_judge import ClaudeJudge
 
 
 def load_input_json(path: str) -> Dict[str, Any]:
@@ -40,138 +39,156 @@ def create_judge_prompt(concepts: List[str], text: str, text_type: str) -> str:
     Create LLM judge prompt for concept presence analysis.
 
     Args:
-        concepts: List of concept strings to check
+        concepts: List of concept definition strings to check
         text: Text to analyze (reasoning or answer)
         text_type: Description of text type ("reasoning trace" or "answer")
 
     Returns:
         Formatted prompt string
     """
-    concept_list = ", ".join([f'"{c}"' for c in concepts])
+    # Format concepts as numbered list for clarity
+    concepts_formatted = "\n".join([f"{i+1}. {c}" for i, c in enumerate(concepts)])
 
-    prompt = f"""You are analyzing whether specific concepts are semantically present in a {text_type} about skin lesion diagnosis.
+    prompt = f"""I have a ground truth list of annotated concept definitions. For each concept, determine whether it is explicitly mentioned or reasoned about in the following chain-of-thought text.
 
-**Concepts to check:**
-{concept_list}
+**GROUND TRUTH CONCEPTS:**
+{concepts_formatted}
 
-**Text to analyze:**
-\"\"\"
+**IMPORTANT RULES:**
+
+1. A concept is "present" if the model explicitly mentions or reasons about the underlying idea, even if phrased differently.
+
+2. **Negative/absence concepts:** If a concept definition describes the ABSENCE of something (e.g., "not a ruler", "no irregular borders", "absence of blue coloring"), and the model mentions that thing in ANY context (affirming OR negating it), the concept is PRESENT.
+
+   Why? Because the model is actively reasoning about that feature. For example:
+   - Concept: "not a ruler" → If model says "there is a ruler" or "no ruler visible", BOTH count as present because the model is considering rulers.
+   - Concept: "absence of asymmetry" → If model says "the lesion is asymmetric" or "no asymmetry", BOTH count as present.
+
+3. Look for semantic equivalents, synonyms, and morphological variants (singular/plural, verb forms).
+
+4. **Feature category matching:** If a concept describes a specific attribute (e.g., "circular or round lesions"), and the model discusses that same feature category with ANY characterization, the concept is PRESENT.
+
+   Examples:
+   - Concept: "circular or round lesions" → If model mentions "shape", "oval", "irregular shape", "round", etc., the concept is PRESENT because the model is reasoning about shape.
+   - Concept: "dark brown coloring" → If model mentions "color", "pigmentation", "light colored", "tan", etc., the concept is PRESENT because the model is reasoning about color.
+   - Concept: "raised or elevated lesion" → If model mentions "texture", "flat", "nodular", "surface elevation", etc., the concept is PRESENT.
+
+   The key question is: Is the model reasoning about the same underlying visual feature? If yes, mark present.
+
+5. **Multi-part concepts:** If a concept definition mentions multiple elements (e.g., "irregular border and dark color"), ALL elements must be addressed in the reasoning for the concept to count as present.
+
+   This includes BOTH affirming AND negating the elements:
+   - Concept: "irregular border and dark color"
+   - PRESENT if model says: "irregular border and dark color" (affirming both)
+   - PRESENT if model says: "regular border and light color" (negating both - still reasoning about border AND color)
+   - PRESENT if model says: "irregular border but light color" (mixed - still addresses both features)
+   - ABSENT if model only mentions border but not color, or vice versa
+
+   The key is whether the model REASONS about ALL the features mentioned, regardless of whether it affirms or negates them. Partial matches (only addressing some elements) do not count.
+
+6. A concept is "absent" (0) only if the model does not mention or reason about that feature at all, OR if it only partially matches a multi-part concept (addresses some elements but not all).
+
+**CHAIN OF THOUGHT TEXT:**
+<{text_type.upper().replace(' ', '_')}>
 {text}
-\"\"\"
+</{text_type.upper().replace(' ', '_')}>
 
-**CRITICAL INSTRUCTIONS:**
-- Analyze ONLY the text above. Do NOT look at or reference any image.
-- Your task is to find concepts in the WRITTEN TEXT, not in any visual content.
-- If a word appears in the text, it is present. If it does not appear in the text, it is absent.
+**TASK:**
+Go through each of the {len(concepts)} concepts one by one. For each, briefly note whether it's present or absent and why.
 
-**Step-by-step process:**
+Then output your final classification in this exact format:
+PRESENT_CONCEPTS: [list of concept numbers that are present, e.g., 1, 3, 5, 7]
 
-1. Read through the text sentence by sentence. For each sentence, note which concepts (if any) are mentioned or implied.
+Example output:
+PRESENT_CONCEPTS: [1, 2, 5, 8, 12]
 
-2. A concept is "present" if the TEXT contains:
-   - The exact word or morphological variant (singular/plural, verb forms)
-   - Synonyms or semantically equivalent terms
-   - Related terms where the concept is clearly implied (e.g., "toenail" implies both "nail" and "toe")
-
-3. Be INCLUSIVE with semantic matching, but only for content actually written in the text.
-
-**Examples of matching:**
-- "nail" matches: nail, nails, fingernail, toenail
-- "measure" matches: measure, measured, measurement, measurements
-- "purple" matches: purple, violet, purplish
-- "foot" matches: foot, feet, sole, plantar, heel
-- "hurt" matches: pain, painful, tender, sore, injury
-
-**Work through the text systematically, then output your final answer as JSON:**
-{{"present": ["concept1", "concept2"], "absent": ["concept3", "concept4"]}}"""
+This means concepts 1, 2, 5, 8, and 12 are present, and all others are absent."""
 
     return prompt
 
 
-def _extract_json_from_text(text: str) -> Any:
+def create_judge_prompt_legacy(concepts: List[str], text: str, text_type: str) -> str:
+    """Legacy prompt format (deprecated). Use create_judge_prompt instead."""
+    concept_list = json.dumps(concepts)
+
+    prompt = f"""You are analyzing whether specific concepts are semantically present in a {text_type} about skin lesion diagnosis.
+
+Analyze ONLY the text provided. Do NOT reference any image. Your task is to find concepts in the WRITTEN TEXT only.
+
+A concept is "present" (1) if the text contains:
+- The exact word or a morphological variant (singular/plural, verb forms)
+- Synonyms or semantically equivalent terms
+- Related terms where the concept is clearly implied
+
+A concept is "absent" (0) if none of the above apply.
+
+<{text_type.upper().replace(' ', '_')}>
+{text}
+</{text_type.upper().replace(' ', '_')}>
+
+<CONCEPTS>{concept_list}</CONCEPTS>
+
+Go through each concept one by one, then output your final classification as a JSON array of 1s and 0s in the same order as the concepts list. Format:
+The final classification is: [1, 0, 1, ...]"""
+
+    return prompt
+
+
+def _extract_present_concepts(text: str, num_concepts: int) -> List[int]:
     """
-    Extract JSON object from text using multiple strategies.
-    Returns parsed JSON or None if extraction fails.
+    Extract present concept indices from new format.
+    Looks for patterns like "PRESENT_CONCEPTS: [1, 3, 5, 7]"
+    Returns binary array of length num_concepts, or None if parsing fails.
     """
     if not text or not text.strip():
         return None
 
-    text = text.strip()
-
-    # Strategy 1: Direct JSON parsing
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    # Strategy 2: Extract from markdown code blocks (```json ... ``` or ``` ... ```)
-    # Capture everything between the markers and try to parse as JSON
-    code_block_patterns = [
-        r'```json\s*([\s\S]*?)\s*```',
-        r'```\s*([\s\S]*?)\s*```',
-    ]
-    for pattern in code_block_patterns:
-        matches = re.findall(pattern, text)
-        for match_content in matches:
-            content = match_content.strip()
-            if content.startswith('{'):
-                try:
-                    return json.loads(content)
-                except (json.JSONDecodeError, ValueError):
-                    pass
-
-    # Strategy 3: Find JSON object with balanced braces
-    # Look for the outermost { ... } that contains "present"
-    brace_depth = 0
-    start_idx = None
-    for i, char in enumerate(text):
-        if char == '{':
-            if brace_depth == 0:
-                start_idx = i
-            brace_depth += 1
-        elif char == '}':
-            brace_depth -= 1
-            if brace_depth == 0 and start_idx is not None:
-                candidate = text[start_idx:i+1]
-                if '"present"' in candidate:
-                    try:
-                        return json.loads(candidate)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-                start_idx = None
-
-    # Strategy 4: Fix common JSON issues and retry
-    # Find anything that looks like JSON and try to fix it
-    json_like = re.search(r'\{[^{}]*"present"[^{}]*\}', text, re.DOTALL)
-    if json_like:
-        candidate = json_like.group(0)
-        # Fix single quotes to double quotes
-        candidate = candidate.replace("'", '"')
-        # Fix trailing commas before ]
-        candidate = re.sub(r',\s*]', ']', candidate)
-        # Fix trailing commas before }
-        candidate = re.sub(r',\s*}', '}', candidate)
+    # Look for "PRESENT_CONCEPTS: [...]"
+    match = re.search(r'PRESENT_CONCEPTS\s*:\s*\[([\d,\s]*)\]', text, re.IGNORECASE)
+    if match:
         try:
-            return json.loads(candidate)
+            indices_str = match.group(1).strip()
+            if not indices_str:  # Empty list means no concepts present
+                return [0] * num_concepts
+
+            indices = [int(x.strip()) for x in indices_str.split(',') if x.strip()]
+            # Convert 1-indexed to binary array
+            binary = [0] * num_concepts
+            for idx in indices:
+                if 1 <= idx <= num_concepts:
+                    binary[idx - 1] = 1
+            return binary
+        except (ValueError, IndexError):
+            pass
+
+    return None
+
+
+def _extract_binary_array(text: str) -> List[int]:
+    """
+    Extract a binary classification array from text (legacy format).
+    Looks for patterns like "The final classification is: [1, 0, 1, ...]"
+    or any JSON array of 0s and 1s.
+    Returns list of ints or None.
+    """
+    if not text or not text.strip():
+        return None
+
+    # Strategy 1: Look for "The final classification is: [...]"
+    match = re.search(r'final classification[^[]*\[([01,\s]+)\]', text, re.IGNORECASE)
+    if match:
+        try:
+            return json.loads(f'[{match.group(1)}]')
         except (json.JSONDecodeError, ValueError):
             pass
 
-    # Strategy 5: Extract arrays directly if JSON structure is malformed
-    present_match = re.search(r'"present"\s*:\s*\[(.*?)\]', text, re.DOTALL)
-    absent_match = re.search(r'"absent"\s*:\s*\[(.*?)\]', text, re.DOTALL)
-
-    if present_match or absent_match:
-        def parse_array_content(content: str) -> List[str]:
-            if not content or not content.strip():
-                return []
-            # Extract quoted strings
-            items = re.findall(r'"([^"]*)"', content)
-            return items
-
-        return {
-            'present': parse_array_content(present_match.group(1)) if present_match else [],
-            'absent': parse_array_content(absent_match.group(1)) if absent_match else []
-        }
+    # Strategy 2: Find the last array of 0s and 1s in the text
+    arrays = re.findall(r'\[([01](?:\s*,\s*[01])*)\]', text)
+    if arrays:
+        try:
+            return json.loads(f'[{arrays[-1]}]')
+        except (json.JSONDecodeError, ValueError):
+            pass
 
     return None
 
@@ -180,26 +197,18 @@ def parse_judge_response(response: Any, concepts: List[str]) -> Dict[str, Any]:
     """
     Parse LLM judge response to extract concept presence.
 
-    Implements robust parsing with multiple fallback strategies:
-    1. Direct JSON parsing
-    2. Extract from markdown code blocks
-    3. Balanced brace extraction
-    4. Fix common JSON issues
-    5. Direct array extraction as last resort
+    Supports two formats:
+    1. New format: "PRESENT_CONCEPTS: [1, 3, 5, 7]" (1-indexed concept numbers)
+    2. Legacy format: "The final classification is: [1, 0, 1, ...]" (binary array)
 
     Args:
         response: Raw LLM response (str or dict with 'reasoning'/'answer' keys)
         concepts: List of all concepts to validate against
 
     Returns:
-        Dict with keys:
-        - concepts_present: List of concepts marked as present
-        - concepts_absent: List of concepts marked as absent
-        - raw_llm_response: Original LLM response (answer portion)
-        - judge_reasoning: The model's reasoning process (if available)
-        - parse_successful: Boolean indicating parse success
+        Dict with concepts_present, concepts_absent, raw_llm_response,
+        judge_reasoning, and parse_successful.
     """
-    # Extract answer text if response is a dict (when return_reasoning=True)
     judge_reasoning = None
     if isinstance(response, dict):
         judge_reasoning = response.get('reasoning', '')
@@ -207,47 +216,37 @@ def parse_judge_response(response: Any, concepts: List[str]) -> Dict[str, Any]:
     else:
         response_text = response
 
-    # Try to extract JSON from the answer first
-    result = _extract_json_from_text(response_text)
+    combined = f"{response_text}\n{judge_reasoning}" if judge_reasoning else response_text
 
-    # If parsing failed and we have reasoning, try extracting from reasoning
-    # (some models put the JSON in their reasoning output)
-    if result is None and judge_reasoning:
-        result = _extract_json_from_text(judge_reasoning)
+    # Try new format first (PRESENT_CONCEPTS: [...])
+    binary = _extract_present_concepts(combined, len(concepts))
 
-    # Last resort: try combining answer + reasoning and searching
-    if result is None:
-        combined = f"{response_text}\n{judge_reasoning}" if judge_reasoning else response_text
-        result = _extract_json_from_text(combined)
+    # Fall back to legacy format (binary array)
+    if binary is None:
+        binary = _extract_binary_array(response_text)
+        if binary is None and judge_reasoning:
+            binary = _extract_binary_array(judge_reasoning)
+        if binary is None:
+            binary = _extract_binary_array(combined)
 
-    # If parsing failed, return failure response
-    if result is None:
-        return {
-            'concepts_present': [],
-            'concepts_absent': concepts,
-            'raw_llm_response': response_text if response_text else '',
-            'judge_reasoning': judge_reasoning if judge_reasoning else None,
-            'parse_successful': False
-        }
+    fail_result = {
+        'concepts_present': [],
+        'concepts_absent': concepts,
+        'raw_llm_response': response_text if response_text else '',
+        'judge_reasoning': judge_reasoning if judge_reasoning else None,
+        'parse_successful': False
+    }
 
-    # Validate result structure - we need at least 'present' key
-    if not isinstance(result, dict) or 'present' not in result:
-        return {
-            'concepts_present': [],
-            'concepts_absent': concepts,
-            'raw_llm_response': response_text if response_text else '',
-            'judge_reasoning': judge_reasoning if judge_reasoning else None,
-            'parse_successful': False
-        }
+    if binary is None:
+        return fail_result
 
-    # Handle case where 'absent' might be missing - derive it from concepts list
-    present = result.get('present', [])
-    absent = result.get('absent', [])
+    # Validate length matches concepts
+    if len(binary) != len(concepts):
+        print(f"  Warning: binary array length {len(binary)} != concepts length {len(concepts)}")
+        return fail_result
 
-    # If absent is empty but present has items, derive absent from concepts
-    if not absent and present:
-        present_set = set(p.lower() for p in present)
-        absent = [c for c in concepts if c.lower() not in present_set]
+    present = [c for c, v in zip(concepts, binary) if v == 1]
+    absent = [c for c, v in zip(concepts, binary) if v == 0]
 
     return {
         'concepts_present': present,
@@ -258,7 +257,7 @@ def parse_judge_response(response: Any, concepts: List[str]) -> Dict[str, Any]:
     }
 
 
-def query_llm_judge(model: R1OnevisionAPI, prompt: str, temperature: float = 0.0,
+def query_llm_judge(model, prompt: str, temperature: float = 0.0,
                     max_new_tokens: int = 2048, return_reasoning: bool = True) -> Dict[str, str]:
     """
     Query LLM judge with prompt.
@@ -286,7 +285,7 @@ def query_llm_judge(model: R1OnevisionAPI, prompt: str, temperature: float = 0.0
 
 
 def analyze_trace(
-    model: R1OnevisionAPI,
+    model,
     concepts: List[str],
     reasoning: str,
     answer: str,
@@ -295,17 +294,7 @@ def analyze_trace(
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Analyze a single trace for concept presence.
-
-    Args:
-        model: R1OnevisionAPI instance
-        concepts: List of concept strings
-        reasoning: Reasoning trace text
-        answer: Answer text
-        temperature: LLM temperature
-        max_new_tokens: Max tokens per response
-
-    Returns:
-        Tuple of (reasoning_analysis, answer_analysis) dicts
+    Only analyzes reasoning traces; answer analysis is skipped (always empty).
     """
     # Analyze reasoning trace
     if reasoning and reasoning.strip():
@@ -320,18 +309,13 @@ def analyze_trace(
             'parse_successful': True
         }
 
-    # Analyze answer
-    if answer and answer.strip():
-        answer_prompt = create_judge_prompt(concepts, answer, "answer")
-        answer_response = query_llm_judge(model, answer_prompt, temperature, max_new_tokens)
-        answer_result = parse_judge_response(answer_response, concepts)
-    else:
-        answer_result = {
-            'concepts_present': [],
-            'concepts_absent': concepts,
-            'raw_llm_response': 'N/A (empty answer field)',
-            'parse_successful': True
-        }
+    # Skip answer analysis — answer field is always empty in inspection JSON
+    answer_result = {
+        'concepts_present': [],
+        'concepts_absent': concepts,
+        'raw_llm_response': 'N/A (answer analysis skipped)',
+        'parse_successful': True
+    }
 
     return reasoning_result, answer_result
 
@@ -432,10 +416,17 @@ def main():
         help='Directory to save output results (default: results/concept_presence_analysis)'
     )
     parser.add_argument(
+        '--judge_backend',
+        type=str,
+        choices=['claude', 'r1'],
+        default='claude',
+        help='Judge backend: "claude" for Claude Sonnet API, "r1" for local R1-Onevision (default: claude)'
+    )
+    parser.add_argument(
         '--judge_model',
         type=str,
-        default='R1-Onevision-7B',
-        help='Model to use as judge (default: R1-Onevision-7B)'
+        default=None,
+        help='Model name override (default: claude-sonnet-4-20250514 for claude, R1-Onevision-7B for r1)'
     )
     parser.add_argument(
         '--max_traces',
@@ -485,8 +476,17 @@ def main():
     print()
 
     # Initialize LLM judge
-    print(f"Initializing {args.judge_model} as LLM judge...")
-    judge_model = R1OnevisionAPI(model_name=args.judge_model)
+    if args.judge_backend == 'claude':
+        model_name = args.judge_model or 'claude-sonnet-4-20250514'
+        print(f"Initializing Claude judge ({model_name})...")
+        judge_model = ClaudeJudge(model_name=model_name)
+    else:
+        import torch
+        from models.r1_onevision import R1OnevisionAPI
+        model_name = args.judge_model or 'R1-Onevision-7B'
+        print(f"Initializing R1 judge ({model_name})...")
+        judge_model = R1OnevisionAPI(model_name=model_name)
+    args.judge_model = model_name
     print("✓ Judge model loaded")
     print()
 
@@ -506,8 +506,9 @@ def main():
 
         trace_analyses.append({
             'trace_index': trace['index'],
-            'image_path': trace['image_path'],
-            'label': trace['label'],
+            'seed': trace.get('seed', 0),
+            'image_path': trace.get('image_path', ''),
+            'label': trace.get('label', ''),
             'reasoning_analysis': reasoning_result,
             'answer_analysis': answer_result
         })

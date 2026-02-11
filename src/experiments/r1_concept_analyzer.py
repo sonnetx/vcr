@@ -256,7 +256,9 @@ class R1ConceptAnalyzer:
         for batch in tqdm(dataloader, desc="Collecting activations"):
             image_batch = batch['image']
 
-            with torch.no_grad():
+            with torch.no_grad(), torch.cuda.amp.autocast():
+                # Clear cache before each batch to prevent OOM
+                torch.cuda.empty_cache()
                 try:
                     from qwen_vl_utils import process_vision_info
                     use_qwen_vl_utils = True
@@ -323,6 +325,10 @@ class R1ConceptAnalyzer:
                     ).to(base_model.device)
 
                 _ = base_model(**inputs)
+
+                # Clear inputs immediately after forward pass
+                del inputs
+                torch.cuda.empty_cache()
 
         hook_handle.remove()
 

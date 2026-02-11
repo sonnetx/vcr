@@ -26,14 +26,28 @@ def load_experiment_config(results_dir):
 
 def load_mean_directional_derivatives(results_dir):
     """Load and compute mean directional derivatives across all seeds"""
+    import re
     list_of_mean_weighted_stabilities = []
-    
-    for subdir in os.listdir(results_dir):
-        if 'seed' in subdir:
-            print(f"Loading: {Path(results_dir) / subdir}")
-            weighted_sens = np.load(Path(results_dir) / subdir / "weighted_sens.npy")
-            list_of_mean_weighted_stabilities.append(weighted_sens.mean(axis=0))
-    
+
+    for subdir in sorted(os.listdir(results_dir)):
+        subdir_path = Path(results_dir) / subdir
+        # Must be a directory matching pattern seed_N (e.g., seed_0, seed_12)
+        # Explicitly skip aggregated_*, analysis_outputs, and other non-seed folders
+        if not subdir_path.is_dir():
+            continue
+        if not re.match(r'^seed_\d+$', subdir):
+            continue
+        weighted_sens_path = subdir_path / "weighted_sens.npy"
+        if not weighted_sens_path.exists():
+            print(f"WARNING: Skipping {subdir} (missing weighted_sens.npy)")
+            continue
+        print(f"Loading: {subdir_path}")
+        weighted_sens = np.load(weighted_sens_path)
+        list_of_mean_weighted_stabilities.append(weighted_sens.mean(axis=0))
+
+    if not list_of_mean_weighted_stabilities:
+        raise ValueError(f"No valid seed directories found in {results_dir}")
+
     return np.vstack(list_of_mean_weighted_stabilities)
 
 
@@ -48,45 +62,63 @@ def compute_statistics(mean_directional_derivatives):
     return t_stats, p_values
 
 
-def get_significant_concepts(mean_per_concept, p_values, concept_texts, n_concepts=20, alpha=0.05):
-    """Get top N significant concepts in positive and negative directions"""
+def get_significant_concepts(mean_per_concept, p_values, concept_texts, n_concepts=20, alpha=0.05, require_significance=False):
+    """Get top N concepts in positive and negative directions.
+
+    Args:
+        mean_per_concept: Mean directional derivative per concept
+        p_values: P-values from t-test
+        concept_texts: List of concept names
+        n_concepts: Number of top concepts to return
+        alpha: Significance level for Bonferroni correction
+        require_significance: If True, only return significant concepts.
+                              If False, return top concepts regardless of significance.
+    """
     n_total_concepts = len(concept_texts)
     bonferroni_threshold = alpha / n_total_concepts
-    
+
     # Get indices of significant concepts
     significant_mask = p_values < bonferroni_threshold
-    
+    n_significant = significant_mask.sum()
+
+    print(f"   Bonferroni threshold: {bonferroni_threshold:.2e}")
+    print(f"   Significant concepts: {n_significant} / {n_total_concepts}")
+
     # Sort by mean directional derivative
     sorted_indices = np.argsort(mean_per_concept)
-    
+
     # Get top positive (highest mean)
     positive_concepts = []
     for idx in sorted_indices[::-1]:
-        if significant_mask[idx]:
-            positive_concepts.append({
-                'rank': len(positive_concepts) + 1,
-                'concept': concept_texts[idx],
-                'mean_dd': mean_per_concept[idx],
-                'p_value': p_values[idx],
-                'concept_idx': idx
-            })
+        if require_significance and not significant_mask[idx]:
+            continue
+        positive_concepts.append({
+            'rank': len(positive_concepts) + 1,
+            'concept': concept_texts[idx],
+            'mean_dd': mean_per_concept[idx],
+            'p_value': p_values[idx],
+            'significant': bool(significant_mask[idx]),
+            'concept_idx': idx
+        })
         if len(positive_concepts) >= n_concepts:
             break
-    
+
     # Get top negative (lowest mean)
     negative_concepts = []
     for idx in sorted_indices:
-        if significant_mask[idx]:
-            negative_concepts.append({
-                'rank': len(negative_concepts) + 1,
-                'concept': concept_texts[idx],
-                'mean_dd': mean_per_concept[idx],
-                'p_value': p_values[idx],
-                'concept_idx': idx
-            })
+        if require_significance and not significant_mask[idx]:
+            continue
+        negative_concepts.append({
+            'rank': len(negative_concepts) + 1,
+            'concept': concept_texts[idx],
+            'mean_dd': mean_per_concept[idx],
+            'p_value': p_values[idx],
+            'significant': bool(significant_mask[idx]),
+            'concept_idx': idx
+        })
         if len(negative_concepts) >= n_concepts:
             break
-    
+
     return positive_concepts, negative_concepts
 
 
@@ -94,21 +126,34 @@ def save_concept_tables(positive_concepts, negative_concepts, results_dir):
     """Save concept tables to CSV files"""
     output_dir = Path(results_dir) / "analysis_outputs"
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
+    # Handle empty lists
+    if not positive_concepts and not negative_concepts:
+        print("WARNING: No concepts to save")
+        return output_dir
+
     # Save positive concepts
-    df_pos = pd.DataFrame(positive_concepts)
-    df_pos = df_pos[['rank', 'concept', 'mean_dd', 'p_value']]
-    pos_path = output_dir / f"top_{str(len(positive_concepts))}_positive_concepts.csv"
-    df_pos.to_csv(pos_path, index=False)
-    print(f"Saved: {pos_path}")
-    
+    if positive_concepts:
+        df_pos = pd.DataFrame(positive_concepts)
+        cols = ['rank', 'concept', 'mean_dd', 'p_value']
+        if 'significant' in df_pos.columns:
+            cols.append('significant')
+        df_pos = df_pos[cols]
+        pos_path = output_dir / f"top_{len(positive_concepts)}_positive_concepts.csv"
+        df_pos.to_csv(pos_path, index=False)
+        print(f"Saved: {pos_path}")
+
     # Save negative concepts
-    df_neg = pd.DataFrame(negative_concepts)
-    df_neg = df_neg[['rank', 'concept', 'mean_dd', 'p_value']]
-    neg_path = output_dir / f"top_{str(len(negative_concepts))}_negative_concepts.csv"
-    df_neg.to_csv(neg_path, index=False)
-    print(f"Saved: {neg_path}")
-    
+    if negative_concepts:
+        df_neg = pd.DataFrame(negative_concepts)
+        cols = ['rank', 'concept', 'mean_dd', 'p_value']
+        if 'significant' in df_neg.columns:
+            cols.append('significant')
+        df_neg = df_neg[cols]
+        neg_path = output_dir / f"top_{len(negative_concepts)}_negative_concepts.csv"
+        df_neg.to_csv(neg_path, index=False)
+        print(f"Saved: {neg_path}")
+
     return output_dir
 
 
@@ -174,11 +219,36 @@ def create_concept_visualization(concept_idx, concept_name, top_indices, bottom_
     plt.close()
 
 
+def load_saved_image_paths(results_dir, seed=0):
+    """
+    Load image paths from saved JSON file.
+
+    This is the preferred method as it guarantees correct index alignment
+    with the saved similarity matrix.
+
+    Args:
+        results_dir: Path to results directory
+        seed: Seed folder to load from
+
+    Returns:
+        List of image paths, or None if file doesn't exist
+    """
+    image_paths_file = Path(results_dir) / f"seed_{seed}" / "image_paths.json"
+    if image_paths_file.exists():
+        with open(image_paths_file, 'r') as f:
+            paths = json.load(f)
+        return [Path(p) for p in paths]
+    return None
+
+
 def prepare_image_paths(config, seed=0):
     """
     Prepare train and test image paths based on config.
-    Must match the DDIDataLoader logic from the experiment script.
-    
+
+    DEPRECATED: This regenerates paths using train_test_split which may not
+    match the original experiment's image ordering. Use load_saved_image_paths()
+    instead when image_paths.json is available.
+
     Args:
         config: Experiment configuration
         seed: Random seed to use (default 0 for seed_0 folder similarity matrix)
@@ -188,10 +258,10 @@ def prepare_image_paths(config, seed=0):
     test_size = config['test_size']
     demo_size = config['demo_size']
     use_demos = config['prompt'].get('use_demos', False)
-    
+
     # Load metadata
     df = pd.read_csv(metadata_path, index_col=0)
-    
+
     # This matches DDIDataLoader.__init__ logic
     # First split: train/test
     train_df, test_df = train_test_split(
@@ -199,7 +269,7 @@ def prepare_image_paths(config, seed=0):
         test_size=test_size,
         random_state=seed  # Use the seed parameter
     )
-    
+
     # Second split: demos (if needed)
     if use_demos:
         train_df, demo_df = train_test_split(
@@ -208,10 +278,10 @@ def prepare_image_paths(config, seed=0):
             random_state=seed  # Use the same seed
         )
         print(f"Using ICL with {len(demo_df)} demo images")
-    
+
     # Create probe paths (train set after demo split)
     probe_paths = [Path(base_dir) / file for file in train_df.DDI_file]
-    
+
     return probe_paths
 
 
@@ -334,9 +404,15 @@ def main(results_dir, n_concepts=20, n_images=7):
         # Prepare image paths
         print("\n7. Preparing image paths...")
         try:
-            # Use seed 0 to match the seed_0 folder from which we load similarity_matrix
-            probe_paths = prepare_image_paths(exp_config, seed=0)
-            print(f"   Loaded {len(probe_paths)} probe images")
+            # First try to load saved image paths (preferred - guarantees correct alignment)
+            probe_paths = load_saved_image_paths(results_dir, seed=0)
+            if probe_paths is not None:
+                print(f"   Loaded {len(probe_paths)} probe images from saved image_paths.json")
+            else:
+                # Fall back to regenerating paths (may have index mismatch issues)
+                print("   WARNING: image_paths.json not found, regenerating paths (may cause index mismatch)")
+                probe_paths = prepare_image_paths(exp_config, seed=0)
+                print(f"   Regenerated {len(probe_paths)} probe images")
         except Exception as e:
             print(f"ERROR: Failed to prepare image paths: {e}")
             print("Skipping this directory...")
@@ -420,8 +496,19 @@ if __name__ == "__main__":
         action='store_true',
         help='Skip directories that already have analysis_outputs folder'
     )
+    parser.add_argument(
+        '--results-dir',
+        type=str,
+        default=None,
+        help='Direct mode: run on a single results directory (bypasses parent-dir walking)'
+    )
 
     args = parser.parse_args()
+
+    # Direct single-dir mode
+    if args.results_dir:
+        success = main(args.results_dir, n_concepts=args.n_concepts, n_images=args.n_images)
+        sys.exit(0 if success else 1)
 
     # Track statistics
     total_processed = 0

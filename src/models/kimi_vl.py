@@ -75,6 +75,10 @@ class KimiVLAPI:
             if use_flash_attention:
                 load_kwargs['attn_implementation'] = "flash_attention_2"
                 print("Using flash attention 2...")
+            else:
+                # Use eager attention to avoid SDPA compatibility issues with Kimi-VL's remote code
+                # (The model's code doesn't define _supports_sdpa which newer transformers requires)
+                load_kwargs['attn_implementation'] = "eager"
 
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_id,
@@ -117,9 +121,10 @@ class KimiVLAPI:
         self.model.eval()
         print(f"Model ready on device!")
 
-    def load_and_resize_image(self, path: Union[str, Image.Image], max_pixels: int = 3200000) -> Image.Image:
+    def load_and_resize_image(self, path: Union[str, Image.Image], max_pixels: int = 1048576) -> Image.Image:
         """Load and resize image while maintaining aspect ratio
-        Note: Kimi-VL supports up to 3.2 million pixels per image"""
+        Note: Kimi-VL supports up to 3.2 million pixels per image.
+        Default reduced to 1M pixels to prevent OOM on smaller GPUs."""
         try:
             if isinstance(path, str):
                 if path.startswith('http://') or path.startswith('https://'):
