@@ -304,19 +304,36 @@ class R1OnevisionAPI:
                     "text": prompt
                 })
 
+                # Use the processor (not bare tokenizer) to get prompt token count
+                # including expanded image tokens, matching how full_tokens is built
                 try:
+                    from qwen_vl_utils import process_vision_info as pvi
                     prompt_text = self.processor.apply_chat_template(
                         prompt_only_messages,
                         tokenize=False,
                         add_generation_prompt=True
                     )
-                    prompt_tokens = self.tokenizer.encode(prompt_text, add_special_tokens=True)
-                except:
-                    prompt_tokens = self.tokenizer.encode(prompt, add_special_tokens=True)
+                    p_image_inputs, p_video_inputs = pvi(prompt_only_messages)
+                    prompt_inputs = self.processor(
+                        text=[prompt_text],
+                        images=p_image_inputs,
+                        videos=p_video_inputs,
+                        padding=True,
+                        return_tensors="pt"
+                    )
+                    prompt_tokens_len = prompt_inputs["input_ids"].shape[1]
+                except ImportError:
+                    prompt_inputs = self.processor(
+                        text=prompt_only_messages,
+                        images=images if images else None,
+                        return_tensors="pt",
+                        padding=True,
+                    )
+                    prompt_tokens_len = prompt_inputs["input_ids"].shape[1]
 
                 full_tokens = inputs["input_ids"][0]
 
-                choice_start = len(prompt_tokens) - 1
+                choice_start = prompt_tokens_len - 1
 
                 choice_logprob = 0
                 for idx in range(choice_start, min(len(full_tokens) - 1, len(logits) - 1)):

@@ -1,10 +1,9 @@
 #!/bin/bash
-#SBATCH --job-name=kimi_vcr
+#SBATCH --job-name=glm4_vcr
 #SBATCH --partition=roxanad
 #SBATCH --gres=gpu:1
 #SBATCH --time=48:00:00
-#SBATCH --mem=64G
-#SBATCH --cpus-per-task=4
+#SBATCH --mem=128G
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
@@ -14,13 +13,13 @@
 #
 # SPDX-License-Identifier: MIT
 
-# Load modules FIRST (required for shared libraries)
-ml gcc/14.2.0
+# Load modules (GCC 10.x for CUDA 11.x compatibility)
+ml gcc/10.3.0
 ml python/3.12.1
 ml cuda/11.7.1
 
-# Then activate venv
-source /home/groups/roxanad/sonnet/vcr/kimi_env/bin/activate
+# Activate GLM4 virtual environment (separate from kimi_env due to different transformers version)
+source /home/groups/roxanad/sonnet/vcr/glm4_env/bin/activate
 
 export PYTHONPATH="/home/groups/roxanad/sonnet/vcr:$PYTHONPATH"
 export TMPDIR=/scratch/users/$USER/tmp
@@ -28,7 +27,7 @@ export HF_HOME=/scratch/users/$USER/huggingface
 export HF_DATASETS_CACHE=/scratch/users/$USER/huggingface/datasets
 export TORCH_HOME=/scratch/users/$USER/torch
 
-# Memory management for MoE models - helps avoid fragmentation OOM
+# Memory management - helps avoid fragmentation OOM
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Create directories
@@ -40,7 +39,8 @@ SCRIPT_DIR="/home/groups/roxanad/sonnet/vcr"
 # Configuration
 skin_tones=("All")
 task_definitions=("malignant_prob")
-model="Kimi-VL-A3B-Thinking"
+model="GLM-4.1V-9B-Thinking"
+layer="model.language_model.layers.39"
 
 for skin_tone in "${skin_tones[@]}"; do
     for task_definition in "${task_definitions[@]}"; do
@@ -48,6 +48,7 @@ for skin_tone in "${skin_tones[@]}"; do
         echo "Running: $model"
         echo "  Skin tone: $skin_tone"
         echo "  Task: $task_definition"
+        echo "  Layer: $layer"
         echo "================================================"
 
         # Construct results directory name (matches bootstrap script output)
@@ -56,17 +57,18 @@ for skin_tone in "${skin_tones[@]}"; do
         else
             skin_suffix="_skin${skin_tone}"
         fi
-        results_dir="${model}_DDI_KimiVL${skin_suffix}_${task_definition}_detailed_medical"
+        results_dir="${model}_DDI_GLM4${skin_suffix}_${task_definition}_detailed_medical"
 
         # =====================================================
         # STEP 1: Run VCR bootstrap experiment (5 seeds)
         # =====================================================
         echo ""
         echo "[Step 1/3] Running VCR bootstrap experiment..."
-        python "${SCRIPT_DIR}/src/experiments/bootstrap_resample_for_pvalues_kimi.py" \
+        python "${SCRIPT_DIR}/src/experiments/bootstrap_resample_for_pvalues_glm4.py" \
             --model "$model" \
             --filter_skin_tone "$skin_tone" \
             --task_definition "$task_definition" \
+            --layer "$layer" \
             --random_seeds 0 1 2 3 4 \
             --top_k_concepts 20
 
@@ -121,5 +123,5 @@ for skin_tone in "${skin_tones[@]}"; do
 done
 
 echo "================================================"
-echo "All Kimi-VL experiments complete!"
+echo "All GLM4 experiments complete!"
 echo "================================================"

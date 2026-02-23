@@ -291,18 +291,28 @@ class KimiVLAPI:
                 prompt_content.append({"type": "text", "text": prompt})
                 prompt_messages = [{"role": "user", "content": prompt_content}]
 
+                # Use the processor (not bare tokenizer) to get prompt token count
+                # including expanded image tokens, matching how full_tokens is built
                 try:
                     prompt_text = self.processor.apply_chat_template(
                         prompt_messages,
                         add_generation_prompt=True,
                         return_tensors="pt"
                     )
-                    prompt_tokens = self.tokenizer.encode(prompt_text, add_special_tokens=True)
+                    prompt_inputs = self.processor(
+                        images=images if images else None,
+                        text=prompt_text,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True
+                    )
+                    prompt_tokens_len = prompt_inputs["input_ids"].shape[1]
                 except:
                     prompt_tokens = self.tokenizer.encode(prompt, add_special_tokens=True)
+                    prompt_tokens_len = len(prompt_tokens)
 
                 full_tokens = inputs["input_ids"][0]
-                choice_start = len(prompt_tokens) - 1
+                choice_start = prompt_tokens_len - 1
 
                 choice_logprob = 0
                 for idx in range(choice_start, min(len(full_tokens) - 1, len(logits) - 1)):

@@ -25,6 +25,7 @@ from typing import List, Dict, Any, Tuple
 from tqdm import tqdm
 
 from models.claude_judge import ClaudeJudge
+from models.gpt_judge import GPTJudge
 
 
 def load_input_json(path: str) -> Dict[str, Any]:
@@ -418,15 +419,15 @@ def main():
     parser.add_argument(
         '--judge_backend',
         type=str,
-        choices=['claude', 'r1'],
+        choices=['claude', 'gpt', 'r1'],
         default='claude',
-        help='Judge backend: "claude" for Claude Sonnet API, "r1" for local R1-Onevision (default: claude)'
+        help='Judge backend: "claude" for Claude API, "gpt" for OpenAI API, "r1" for local R1-Onevision (default: claude)'
     )
     parser.add_argument(
         '--judge_model',
         type=str,
         default=None,
-        help='Model name override (default: claude-sonnet-4-20250514 for claude, R1-Onevision-7B for r1)'
+        help='Model name override (default: claude-sonnet-4-20250514 for claude, gpt-4o for gpt, R1-Onevision-7B for r1)'
     )
     parser.add_argument(
         '--max_traces',
@@ -480,6 +481,10 @@ def main():
         model_name = args.judge_model or 'claude-sonnet-4-20250514'
         print(f"Initializing Claude judge ({model_name})...")
         judge_model = ClaudeJudge(model_name=model_name)
+    elif args.judge_backend == 'gpt':
+        model_name = args.judge_model or 'gpt-4o'
+        print(f"Initializing GPT judge ({model_name})...")
+        judge_model = GPTJudge(model_name=model_name)
     else:
         import torch
         from models.r1_onevision import R1OnevisionAPI

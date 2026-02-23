@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=kimi_setup
 #SBATCH --partition=roxanad
-#SBATCH --gres=gpu:1
 #SBATCH --time=12:00:00
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=4
@@ -53,10 +52,21 @@ pip3 install --no-cache-dir accelerate --no-deps
 pip3 install --no-cache-dir psutil  # accelerate dependency
 pip3 install --no-cache-dir pillow
 pip3 install --no-cache-dir requests
+pip3 install --no-cache-dir einops
+pip3 install --no-cache-dir open_clip_torch
+
 # Kimi-VL processor dependencies (the model's remote code has many undocumented deps)
 pip3 install --no-cache-dir tiktoken==0.7.0 protobuf blobfile sentencepiece
 # Pin scipy to version with prebuilt wheels for Python 3.12
 pip3 install --no-cache-dir pandas scipy==1.11.4 scikit-learn matplotlib
+
+# Note: qwen-vl-utils is optional - requires FFmpeg system libraries (libavformat, etc.)
+# The code has a fallback that works for image-only use cases without it.
+# If you need video support and have FFmpeg installed, uncomment the following:
+# pip3 install --no-cache-dir qwen-vl-utils
+
+# Visualization dependencies
+pip3 install --no-cache-dir matplotlib-venn seaborn
 
 # Flash attention is recommended to avoid OOM errors with long generation
 pip3 install --no-cache-dir flash-attn --no-build-isolation
